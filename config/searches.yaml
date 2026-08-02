@@ -1,0 +1,21 @@
+searches:
+  - role: "Software Engineer"
+    locations:
+      - "Remote"
+      - "San Francisco, CA"
+    site_names:
+      - "linkedin"
+      - "indeed"
+    hours_old: 72
+    results_wanted: 10
+    remote_only: true
+
+  - role: "Python Developer"
+    locations:
+      - "Bangalore"
+    site_names:
+      - "naukri"
+      - "google"
+    hours_old: 168
+    results_wanted: 15
+    remote_only: false

@@ -1,0 +1,30 @@
+# Logs
+logs/
+*.log
+
+# Environment variables / secrets
+.env
+
+# User profile config
+config/profile.json
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python cache / bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# OS metadata
+.DS_Store
+Thumbs.db

@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JobApplyPro Candidate Profile",
+  "description": "Structured resume data used by every downstream stage (scoring, tailoring, cover letters). `resume_facts` is the protected list that tailor.py must never alter.",
+  "type": "object",
+  "required": ["contact", "skills", "experience", "education", "projects", "resume_facts"],
+  "properties": {
+    "contact": {
+      "type": "object",
+      "required": ["name", "email"],
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": ["string", "null"] },
+        "location": { "type": ["string", "null"] },
+        "linkedin_url": { "type": ["string", "null"] },
+        "github_url": { "type": ["string", "null"] },
+        "portfolio_url": { "type": ["string", "null"] }
+      }
+    },
+    "summary": {
+      "type": ["string", "null"],
+      "description": "Professional summary / objective, if present on the resume."
+    },
+    "skills": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Flat list of technical and soft skills as they appear on the resume."
+    },
+    "experience": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["company", "title", "start_date"],
+        "properties": {
+          "company": { "type": "string" },
+          "title": { "type": "string" },
+          "start_date": { "type": "string" },
+          "end_date": { "type": "string", "description": "Use 'Present' if current role." },
+          "location": { "type": ["string", "null"] },
+          "achievements": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Bullet points, kept as close to original wording as possible."
+          }
+        }
+      }
+    },
+    "education": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["institution", "degree"],
+        "properties": {
+          "institution": { "type": "string" },
+          "degree": { "type": "string" },
+          "field": { "type": ["string", "null"] },
+          "start_date": { "type": ["string", "null"] },
+          "end_date": { "type": ["string", "null"] },
+          "marks": {
+            "type": ["string", "null"],
+            "description": "Grade / percentage / CGPA exactly as written on the resume (e.g. '87%', '8.5 CGPA')."
+          }
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "description": "Personal / academic / professional projects listed on the resume.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "technologies": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Tech stack / tools used, if listed."
+          },
+          "start_date": { "type": ["string", "null"] },
+          "end_date": { "type": ["string", "null"] },
+          "url": { "type": ["string", "null"] },
+          "achievements": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Bullet points describing what was built, kept close to original wording."
+          }
+        }
+      }
+    },
+    "certifications": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "resume_facts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Verbatim, atomic facts pulled from the resume (e.g. 'Company: Acme Corp', 'Title: Senior Engineer', 'Dates: Jan 2022 - Present', 'Achievement: Reduced latency by 40%', 'Project: Foo', 'Grade: 87%'). tailor.py checks its output against this list and must never contradict or omit any of these."
+    }
+  }
+}
