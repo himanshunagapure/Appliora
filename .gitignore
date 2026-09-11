@@ -33,3 +33,4 @@ output/
 .DS_Store
 Thumbs.db
 how-to-connect-personal-github.txt
+tests/
