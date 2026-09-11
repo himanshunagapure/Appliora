@@ -7,6 +7,7 @@ logs/
 
 # User profile config
 config/profile.json
+config/.profile_embedding_cache.json
 
 # Virtual Environment
 .venv/
@@ -25,6 +26,10 @@ __pycache__/
 *.sqlite
 *.sqlite3
 
+# Generated tailored resumes / cover letters
+output/
+
 # OS metadata
 .DS_Store
 Thumbs.db
+how-to-connect-personal-github.txt

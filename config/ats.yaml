@@ -1,0 +1,66 @@
+# ATS / apply routing config for Phase 7 (FR6).
+# Ideas aligned with ApplyPilot's sites.yaml behavior — reimplemented, not copied.
+#
+# Cascade (ADR-002):
+#   Tier 1 — domain matched by a deterministic adapter (LinkedIn / Workday /
+#            Greenhouse / high-confidence generic) → fill without an LLM agent.
+#   Tier 2 — domains listed under tier2_ats (or former manual_ats), plus
+#            unrecognized / low-confidence forms → browser-use agent, then
+#            screenshot + apply_pending (same safety wraps as Tier 1).
+#   Tier 3 — Tier 2 fails / CAPTCHA / low confidence → manual_review.
+
+# Domains that skip Tier 1 and go to the Tier 2 generalized agent.
+# (Kept under both keys: tier2_ats is preferred; manual_ats is a legacy alias.)
+tier2_ats:
+  - jobs.lever.co
+  - lever.co
+  - apply.workable.com
+  - jobs.ashbyhq.com
+  - ibegin.tcsapps.com
+
+# Legacy alias — same domains as tier2_ats. Prefer tier2_ats going forward.
+manual_ats:
+  - jobs.lever.co
+  - lever.co
+  - apply.workable.com
+  - jobs.ashbyhq.com
+  - ibegin.tcsapps.com
+
+# Skip these hosts/patterns entirely (policy / low success rate).
+blocked:
+  sites:
+    - glassdoor
+    - workopolis
+  url_patterns:
+    - "%glassdoor%"
+    - "%google.com/about/careers%"
+    - "%google.jobs%"
+    - "%workopolis.com/out%"
+
+# If navigation lands here, stop — do not attempt Google/Microsoft/Okta login.
+blocked_sso:
+  - accounts.google.com
+  - login.microsoftonline.com
+  - okta.com
+  - auth0.com
+  - login.okta.com
+  - sso.cisco.com
+
+# Strong CAPTCHA / bot-wall signals (prefer widget markers over the bare word
+# "captcha", which appears in many benign pages and caused false positives).
+captcha_signals:
+  - g-recaptcha
+  - h-captcha
+  - hcaptcha.com
+  - "cf-turnstile"
+  - "challenges.cloudflare.com"
+  - "recaptcha/api"
+  - funcaptcha
+  - arkoselabs
+  - "are you a human"
+  - "verify you are a human"
+  - "verify you're human"
+  - "attention required"
+  - "challenge-platform"
+  - "cf-browser-verification"
+  - "unusual traffic"

@@ -1,11 +1,21 @@
 import pytest
 from unittest.mock import patch
 import pandas as pd
-from core.discover import run_discovery
+from core.discover import _clean_text, run_discovery
 from db.session import get_db_session
 from db.models import Job, RunLog
 from sqlalchemy import select
 import datetime
+import math
+
+
+def test_clean_text_rejects_pandas_nan_and_nan_strings():
+    assert _clean_text(float("nan")) == ""
+    assert _clean_text(pd.NA) == ""
+    assert _clean_text("nan") == ""
+    assert _clean_text("NaN") == ""
+    assert _clean_text(None, default="Unknown") == "Unknown"
+    assert _clean_text("Acme Corp") == "Acme Corp"
 
 # Fixed mock URLs so we can clean them up precisely
 MOCK_LINKEDIN_URL = "https://example.com/job/mock-linkedin-1"
@@ -58,6 +68,11 @@ def test_run_discovery_logic():
     with patch("core.discover.scrape_jobs") as mock_scrape:
         mock_scrape.return_value = mock_df
         run_discovery()
+        # LinkedIn search cards omit the body unless this flag is set.
+        assert any(
+            call.kwargs.get("linkedin_fetch_description") is True
+            for call in mock_scrape.call_args_list
+        )
 
     # ── Assertions ──────────────────────────────────────────────────────────────
     with get_db_session() as session:

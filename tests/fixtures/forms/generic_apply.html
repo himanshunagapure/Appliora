@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Apply — Acme Corp</title></head>
+<body>
+  <h1>Software Engineer at Acme Corp</h1>
+  <script type="application/ld+json">
+  {"@type":"JobPosting","title":"Software Engineer","hiringOrganization":{"name":"Acme Corp"}}
+  </script>
+  <form id="apply-form" action="/apply" method="post">
+    <label>Full name <input type="text" id="full_name" name="full_name" required></label>
+    <label>Email <input type="email" id="email" name="email" required></label>
+    <label>Phone <input type="tel" id="phone" name="phone"></label>
+    <label>Resume <input type="file" id="resume" name="resume" accept=".pdf"></label>
+    <label>Cover letter <textarea id="cover_letter" name="cover_letter"></textarea></label>
+    <button type="button">Apply</button>
+    <button type="submit">Submit application</button>
+  </form>
+</body>
+</html>

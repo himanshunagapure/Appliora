@@ -46,6 +46,9 @@ class Application(Base):
     tailored_resume_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     cover_letter_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     screenshot_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # Phase 8 — human review gate (None = not reviewed, approved | rejected)
+    review_decision: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -60,7 +63,10 @@ class Application(Base):
     job: Mapped["Job"] = relationship(back_populates="application")
 
     def __repr__(self) -> str:
-        return f"<Application id={self.id} job_id={self.job_id} submitted_at={self.submitted_at}>"
+        return (
+            f"<Application id={self.id} job_id={self.job_id} "
+            f"review={self.review_decision!r} submitted_at={self.submitted_at}>"
+        )
 
 
 class RunLog(Base):

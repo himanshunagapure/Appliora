@@ -147,3 +147,38 @@ class LLMClient:
         if not isinstance(parsed, dict):
             raise ValueError(f"Expected a JSON object, got {type(parsed).__name__}")
         return parsed
+
+
+class EmbeddingClient:
+    """
+    Local, zero-cost embedding client for Phase 4 scoring.
+
+    Uses ChromaDB's DefaultEmbeddingFunction, which runs a small ONNX MiniLM
+    model on-device via onnxruntime — no API key, no per-call cost, and no
+    network dependency after the model is cached locally on first use. This
+    keeps scoring free even at high job volumes, unlike a paid embeddings API.
+
+    Swappable: pass a different `embedding_fn` (e.g. a Gemini or OpenAI
+    embeddings wrapper) if you'd rather trade the one-time local model
+    download for an API-based approach.
+    """
+
+    def __init__(self, embedding_fn=None):
+        if embedding_fn is not None:
+            self._embedding_fn = embedding_fn
+        else:
+            from chromadb.utils import embedding_functions
+
+            self._embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of strings. Returns one vector per input string."""
+        if not texts:
+            return []
+        result = self._embedding_fn(texts)
+        # chromadb may return numpy arrays / float32 — coerce to plain Python floats
+        # so callers can json.dumps the vectors (e.g. profile embedding cache).
+        return [[float(x) for x in vec] for vec in result]
+
+    def embed_text(self, text: str) -> list[float]:
+        return self.embed_texts([text])[0]

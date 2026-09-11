@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"
+        extra="ignore",
+        populate_by_name=True,
     )
 
     gemini_api_key: str = Field(..., validation_alias="GEMINI_API_KEY")
@@ -32,8 +33,46 @@ class Settings(BaseSettings):
     database_url: str = Field("sqlite:///./jobapplypro.db", validation_alias="DATABASE_URL")
     pinecone_api_key: Optional[str] = Field(None, validation_alias="PINECONE_API_KEY")
 
+    # Scoring (Phase 4) — final score is 1–10; jobs at/above threshold go to tailoring.
+    score_threshold: float = Field(default=6.0, validation_alias="SCORE_THRESHOLD")
+    score_semantic_weight: float = Field(default=0.4, validation_alias="SCORE_SEMANTIC_WEIGHT")
+    score_llm_weight: float = Field(default=0.6, validation_alias="SCORE_LLM_WEIGHT")
+
     profile_schema_path: Path = CONFIG_DIR / "profile.schema.json"
     profile_output_path: Path = CONFIG_DIR / "profile.json"
+    profile_embedding_cache_path: Path = CONFIG_DIR / ".profile_embedding_cache.json"
+    tailored_output_dir: Path = PROJECT_ROOT / "output" / "tailored"
+    cover_letter_output_dir: Path = PROJECT_ROOT / "output" / "cover_letters"
+    screenshot_output_dir: Path = PROJECT_ROOT / "output" / "screenshots"
+    ats_config_path: Path = CONFIG_DIR / "ats.yaml"
+
+    # Phase 7 — browser / form fill
+    browser_headless: bool = Field(default=True, validation_alias="BROWSER_HEADLESS")
+    browser_user_data_dir: Path | None = Field(
+        default=None, validation_alias="BROWSER_USER_DATA_DIR"
+    )
+    # When headed + LinkedIn auth wall: seconds to wait for you to sign in before giving up.
+    browser_login_wait_seconds: int = Field(
+        default=180, validation_alias="BROWSER_LOGIN_WAIT_SECONDS"
+    )
+    # e.g. "chrome" to use installed Google Chrome (Workday often rejects bundled Chromium).
+    browser_channel: str | None = Field(default=None, validation_alias="BROWSER_CHANNEL")
+    form_min_confidence: float = Field(
+        default=0.55, validation_alias="FORM_MIN_CONFIDENCE"
+    )
+
+    # Phase 7 Tier 2 — browser-use agent (costs LLM tokens per attempt)
+    tier2_enabled: bool = Field(default=True, validation_alias="TIER2_ENABLED")
+    tier2_max_jobs_per_run: int = Field(
+        default=5, validation_alias="TIER2_MAX_JOBS_PER_RUN"
+    )
+    tier2_max_agent_steps: int = Field(
+        default=50, validation_alias="TIER2_MAX_AGENT_STEPS"
+    )
+    # Model for browser-use ChatGoogle; defaults to the same Gemini model as LLMClient.
+    tier2_llm_model: str = Field(
+        default="", validation_alias="TIER2_LLM_MODEL"
+    )
 
     searches: List[SearchConfig] = []
 

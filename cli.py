@@ -47,8 +47,203 @@ def cmd_run(args: argparse.Namespace) -> int:
             logger.error("Pipeline stage 'discover' failed with error: %s", e, exc_info=True)
             return 1
 
+    if args.stage == "score":
+        from core.score import ScoringError, run_scoring_stage
+
+        logger.info("Executing pipeline stage: 'score'")
+        try:
+            summary = run_scoring_stage()
+        except ScoringError as exc:
+            logger.error("Scoring stage aborted: %s", exc)
+            print(f"\nScoring stage aborted: {exc}\n", file=sys.stderr)
+            return 1
+        except Exception as e:
+            logger.error("Pipeline stage 'score' failed with error: %s", e, exc_info=True)
+            return 1
+
+        print(
+            f"\nScoring stage complete\n"
+            f"   Processed:       {summary['processed']}\n"
+            f"   Scored:          {summary['scored']}\n"
+            f"   Above threshold: {summary['above_threshold']}\n"
+            f"   Failed:          {summary['failed']}\n"
+        )
+        return 0
+
+    if args.stage == "tailor":
+        from core.tailor import TailoringError, run_tailoring_stage
+
+        logger.info("Executing pipeline stage: 'tailor'")
+        try:
+            summary = run_tailoring_stage()
+        except TailoringError as exc:
+            logger.error("Tailoring stage aborted: %s", exc)
+            print(f"\nTailoring stage aborted: {exc}\n", file=sys.stderr)
+            return 1
+        except Exception as e:
+            logger.error("Pipeline stage 'tailor' failed with error: %s", e, exc_info=True)
+            return 1
+
+        print(
+            f"\nTailoring stage complete\n"
+            f"   Processed:      {summary['processed']}\n"
+            f"   Tailored:       {summary['tailored']}\n"
+            f"   Manual review:  {summary['manual_review']}\n"
+            f"   Failed:         {summary['failed']}\n"
+        )
+        return 0
+
+    if args.stage == "cover_letter":
+        from core.cover_letter import CoverLetterError, run_cover_letter_stage
+
+        logger.info("Executing pipeline stage: 'cover_letter'")
+        try:
+            summary = run_cover_letter_stage()
+        except CoverLetterError as exc:
+            logger.error("Cover letter stage aborted: %s", exc)
+            print(f"\nCover letter stage aborted: {exc}\n", file=sys.stderr)
+            return 1
+        except Exception as e:
+            logger.error(
+                "Pipeline stage 'cover_letter' failed with error: %s", e, exc_info=True
+            )
+            return 1
+
+        print(
+            f"\nCover letter stage complete\n"
+            f"   Processed:           {summary['processed']}\n"
+            f"   Cover letter ready:  {summary['cover_letter_ready']}\n"
+            f"   Manual review:       {summary['manual_review']}\n"
+            f"   Failed:              {summary['failed']}\n"
+        )
+        return 0
+
+    if args.stage == "apply":
+        if args.dry_run and args.submit:
+            print("Use only one of --dry-run or --submit.", file=sys.stderr)
+            return 1
+
+        from core.apply import ApplyError, run_apply_stage
+
+        dry_run = not args.submit
+        if args.dry_run:
+            dry_run = True
+        if args.submit:
+            dry_run = False
+
+        mode = "submit" if args.submit else "dry-run"
+        logger.info(
+            "Executing pipeline stage: 'apply' (%s, job_id=%s)", mode, args.job_id
+        )
+        try:
+            summary = run_apply_stage(
+                dry_run=dry_run,
+                submit=bool(args.submit),
+                job_id=args.job_id,
+            )
+        except ApplyError as exc:
+            logger.error("Apply stage aborted: %s", exc)
+            print(f"\nApply stage aborted: {exc}\n", file=sys.stderr)
+            return 1
+        except Exception as e:
+            logger.error("Pipeline stage 'apply' failed with error: %s", e, exc_info=True)
+            return 1
+
+        print(
+            f"\nApply stage complete ({mode})\n"
+            f"   Processed:      {summary['processed']}\n"
+            f"   Apply pending:  {summary['apply_pending']}\n"
+            f"   Applied:        {summary['applied']}\n"
+            f"   Manual review:  {summary['manual_review']}\n"
+            f"   Failed:         {summary['failed']}\n"
+            f"   Skipped:        {summary['skipped']}\n"
+            f"   Tier 2 agent:   {summary.get('tier2_attempts', 0)}\n"
+        )
+        return 0
+
     logger.error("Stage '%s' is not implemented yet in this version.", args.stage)
     return 1
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Show apply_pending jobs and approve/reject them (Phase 8)."""
+    from core.review import (
+        ReviewError,
+        approve_job,
+        format_review_card,
+        list_pending_reviews,
+        open_screenshot,
+        reject_job,
+        run_interactive_review,
+    )
+
+    if args.approve and args.reject:
+        print("Use only one of --approve or --reject.", file=sys.stderr)
+        return 1
+    if (args.approve or args.reject) and args.job_id is None:
+        print("--approve / --reject requires --job-id <id>.", file=sys.stderr)
+        return 1
+
+    try:
+        if args.approve:
+            item = approve_job(args.job_id)
+            print(f"\nApproved job {item.job_id} ({item.company} — {item.title})")
+            print(
+                "Submit with:\n"
+                f"  python cli.py run --stage apply --submit --job-id {item.job_id}\n"
+            )
+            return 0
+        if args.reject:
+            item = reject_job(args.job_id, reason=args.reason)
+            print(
+                f"\nRejected job {item.job_id} ({item.company} — {item.title}) "
+                f"→ status=skipped\n"
+            )
+            return 0
+        if args.interactive:
+            summary = run_interactive_review(
+                job_id=args.job_id,
+                open_screenshots=args.open,
+            )
+            print(
+                f"\nReview session: shown={summary['shown']} "
+                f"approved={summary['approved']} rejected={summary['rejected']} "
+                f"skipped={summary['skipped']}\n"
+            )
+            return 0
+
+        items = list_pending_reviews(job_id=args.job_id)
+        if not items:
+            if args.job_id is not None:
+                print(f"No apply_pending job with id={args.job_id}.")
+            else:
+                print("No apply_pending jobs. Run apply --dry-run first.")
+            return 0
+
+        print(f"\n{len(items)} apply_pending job(s) awaiting review\n")
+        for i, item in enumerate(items, 1):
+            print("=" * 72)
+            print(f"[{i}/{len(items)}]")
+            print(format_review_card(item))
+            print()
+            if args.open:
+                open_screenshot(item.screenshot_path)
+
+        print(
+            "Approve:  python cli.py review --approve --job-id <id>\n"
+            "Reject:   python cli.py review --reject --job-id <id>\n"
+            "Submit:   python cli.py run --stage apply --submit --job-id <id>\n"
+            "Walkthrough: python cli.py review --interactive\n"
+        )
+        return 0
+    except ReviewError as exc:
+        logger.error("Review aborted: %s", exc)
+        print(f"\nReview aborted: {exc}\n", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        logger.error("Review command failed: %s", exc, exc_info=True)
+        print(f"\nReview failed: {exc}\n", file=sys.stderr)
+        return 1
 
 
 def main() -> int:
@@ -77,7 +272,67 @@ def main() -> int:
         choices=["discover", "score", "tailor", "cover_letter", "apply"],
         help="Pipeline stage to execute",
     )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="For apply stage: fill forms and screenshot without submitting (default behavior)",
+    )
+    run_parser.add_argument(
+        "--submit",
+        action="store_true",
+        default=False,
+        help="For apply stage: actually submit (requires --job-id of an *approved* apply_pending job)",
+    )
+    run_parser.add_argument(
+        "--job-id",
+        type=int,
+        default=None,
+        help="Limit apply stage to a single job id",
+    )
     run_parser.set_defaults(func=cmd_run)
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="Review apply_pending jobs (screenshot + materials); approve or reject",
+    )
+    review_parser.add_argument(
+        "--job-id",
+        type=int,
+        default=None,
+        help="Limit to a single job id",
+    )
+    review_parser.add_argument(
+        "--approve",
+        action="store_true",
+        default=False,
+        help="Approve the job (requires --job-id) so --submit may run",
+    )
+    review_parser.add_argument(
+        "--reject",
+        action="store_true",
+        default=False,
+        help="Reject the job (requires --job-id); status becomes skipped",
+    )
+    review_parser.add_argument(
+        "--reason",
+        default=None,
+        help="Optional reject reason stored on the job",
+    )
+    review_parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        default=False,
+        help="Walk each pending job and prompt approve/reject/skip",
+    )
+    review_parser.add_argument(
+        "--open",
+        action="store_true",
+        default=False,
+        help="Open the screenshot in the default image viewer",
+    )
+    review_parser.set_defaults(func=cmd_review)
 
     args = parser.parse_args()
 

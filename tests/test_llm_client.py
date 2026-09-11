@@ -35,3 +35,19 @@ def test_parse_json_extracts_object_from_prose():
 def test_parse_json_rejects_empty():
     with pytest.raises(json.JSONDecodeError):
         LLMClient._parse_json("   ")
+
+
+def test_embedding_client_returns_json_serializable_floats():
+    """Chroma/ONNX returns numpy float32; cache writes must not blow up."""
+    import numpy as np
+
+    from llm.client import EmbeddingClient
+
+    class FakeFn:
+        def __call__(self, texts):
+            return [np.array([0.1, 0.2, 0.3], dtype=np.float32) for _ in texts]
+
+    emb = EmbeddingClient(embedding_fn=FakeFn())
+    vec = emb.embed_text("hello")
+    assert all(type(x) is float for x in vec)
+    json.dumps(vec)  # must not raise

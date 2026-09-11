@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <button class="jobs-apply-button" aria-label="Easy Apply">Easy Apply</button>
+  <!-- Legacy Easy Apply modal fields -->
+  <div class="jobs-easy-apply-modal">
+    <input name="email" type="email" />
+    <input name="phoneNumber" type="tel" />
+    <input type="file" />
+    <button>Next</button>
+    <button>Submit application</button>
+  </div>
+  <!-- 2025+ LinkedIn Easy Apply: opaque ids + label association -->
+  <form>
+    <label for="ea-email">Email address</label>
+    <input id="ea-email" type="email" />
+    <label for="ea-phone">Mobile phone number*</label>
+    <input id="ea-phone" type="tel" required />
+  </form>
+</body>
+</html>
