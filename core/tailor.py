@@ -2,8 +2,8 @@
 Phase 5 — Resume Tailoring (FR4)
 
 For every job in status="scored" with score >= score_threshold: generate a
-job-specific markdown resume, validate it preserves every resume_fact, retry
-once on failure, then either:
+job-specific ATS-friendly resume (markdown source + Calibri DOCX), validate
+it preserves every resume_fact, retry once on failure, then either:
   - save the resume + mark status="tailored", or
   - flag status="manual_review" if facts are still missing after retry.
 
@@ -88,13 +88,38 @@ def save_tailored_resume(
     markdown: str,
     output_dir: str | Path | None = None,
 ) -> Path:
+    """
+    Write markdown (review), ATS-friendly DOCX (upload), ATS PDF, and
+    a designed `*.styled.pdf` sibling (Phase 11 — visual layout, not for ATS).
+
+    Returns the .docx path — primary ATS upload artifact.
+    """
+    from automation.resume_upload import (
+        markdown_to_docx,
+        markdown_to_pdf,
+        markdown_to_styled_pdf,
+    )
+
     settings = get_settings()
     base = Path(output_dir or settings.tailored_output_dir)
     base.mkdir(parents=True, exist_ok=True)
-    filename = f"job_{job_id}_{_slugify(company)}_{_slugify(title)}.md"
-    path = base / filename
-    path.write_text(markdown.strip() + "\n", encoding="utf-8")
-    return path
+    stem = f"job_{job_id}_{_slugify(company)}_{_slugify(title)}"
+    md_path = base / f"{stem}.md"
+    docx_path = base / f"{stem}.docx"
+    pdf_path = base / f"{stem}.pdf"
+    styled_path = base / f"{stem}.styled.pdf"
+    body = markdown.strip() + "\n"
+    md_path.write_text(body, encoding="utf-8")
+    markdown_to_docx(body, docx_path)
+    try:
+        markdown_to_pdf(body, pdf_path)
+    except Exception as extra:
+        logger.warning("Failed to write ATS PDF for job %d: %s", job_id, extra)
+    try:
+        markdown_to_styled_pdf(body, styled_path)
+    except Exception as extra:
+        logger.warning("Failed to write styled PDF for job %d: %s", job_id, extra)
+    return docx_path
 
 
 def _truncate(text: str, max_chars: int = 8000) -> str:

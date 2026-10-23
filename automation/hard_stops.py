@@ -104,6 +104,22 @@ _MARKETPLACE_PATTERNS = (
 )
 
 
+def is_aggregator_auth_wall(url: str) -> bool:
+    """Indeed/Naukri login or bot-detection pages — not the application form."""
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+    if host.endswith("indeed.com"):
+        if "/auth" in path or "bot-detection" in query or "from=login" in query:
+            return True
+    if host.endswith("naukri.com") and any(
+        token in path for token in ("/nlogin", "/login", "/mnjlogin")
+    ):
+        return True
+    return False
+
+
 def _match_any(text: str, patterns: tuple[str, ...]) -> str | None:
     lower = text or ""
     for pat in patterns:
@@ -170,6 +186,13 @@ def detect_hard_stop(
             "not_a_job_application",
             "skipped",
             f"contractor marketplace host: {host}",
+        )
+
+    if is_aggregator_auth_wall(url):
+        return HardStop(
+            "sso_required",
+            "manual_review",
+            "job-board login / bot-detection wall — sign in via BROWSER_USER_DATA_DIR",
         )
 
     text = html or ""

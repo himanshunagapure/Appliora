@@ -86,11 +86,18 @@ def _excerpt(path: str | None) -> str:
     if not p.exists():
         return f"(file not found: {path})"
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            return f"(image {p.suffix} — open the file to inspect)"
+        if p.suffix.lower() in {".doc"}:
+            return f"(binary {p.suffix} — open the file to inspect)"
+        if p.suffix.lower() in {".docx", ".pdf", ".md", ".markdown", ".txt", ""}:
+            from automation.resume_upload import read_resume_text
+
+            text = read_resume_text(p)
+        else:
+            text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
         return f"(unreadable: {exc})"
-    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".docx", ".doc"}:
-        return f"(binary {p.suffix} — open the file to inspect)"
     lines = text.splitlines()
     snippet = "\n".join(lines[:EXCERPT_LINES])
     if len(snippet) > EXCERPT_CHARS:

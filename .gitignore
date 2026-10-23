@@ -8,6 +8,7 @@ logs/
 # User profile config
 config/profile.json
 config/.profile_embedding_cache.json
+config/proxies.txt
 
 # Virtual Environment
 .venv/
@@ -25,6 +26,9 @@ __pycache__/
 *.db
 *.sqlite
 *.sqlite3
+
+# Postgres unix socket used by agent sandbox (see scripts/setup_pg_socket.sh)
+.pg_sock/
 
 # Generated tailored resumes / cover letters
 output/

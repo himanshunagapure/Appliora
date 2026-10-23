@@ -90,6 +90,12 @@ class GenericAdapter:
                     path = None
                     if field.name == "resume" and resume_path:
                         path = Path(resume_path)
+                        try:
+                            from automation.resume_upload import ensure_uploadable_resume
+
+                            path = ensure_uploadable_resume(path)
+                        except Exception as exc:
+                            logger.warning("Generic resume convert skipped: %s", exc)
                     elif field.name == "cover_letter" and cover_path:
                         path = Path(cover_path)
                     if path and path.exists():

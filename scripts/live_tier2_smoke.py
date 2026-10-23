@@ -28,8 +28,8 @@ def main() -> int:
     settings = get_settings()
     # Use full configured budget — previous 25-step cap caused incomplete fills.
     settings.tier2_max_agent_steps = max(settings.tier2_max_agent_steps, 50)
-    if settings.browser_headless is False:
-        print("BROWSER_HEADLESS=false — agent will open a visible Chrome window")
+    settings.tier2_headless = False
+    print("Tier 2 headed (TIER2_HEADLESS=false) — agent will open a visible Chrome window")
 
     profile = json.loads(PROFILE.read_text(encoding="utf-8"))
     if not RESUME.exists():

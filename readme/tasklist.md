@@ -2,6 +2,8 @@
 
 Personal job-search automation pipeline: parse resume once → discover jobs across LinkedIn, Indeed, Naukri, Glassdoor, Google Jobs → score → tailor resume + cover letter per job → dry-run fill applications → human-approved submit.
 
+**How to run end-to-end:** see [`E2E_GUIDE.md`](E2E_GUIDE.md).
+
 Full design: see `JobApplyPro_Technical_Design.md`.
 
 ---
@@ -64,7 +66,7 @@ Check items off as you go. Tasks are grouped into phases that roughly match the 
 - [x] Write `llm/prompts/tailor_prompt.py` with explicit "never alter resume_facts" constraint
 - [x] Write `core/tailor.py`: generate tailored resume text per job
 - [x] Write validation check: diff output against `resume_facts`, retry once if altered, flag `manual_review` if still failing
-- [x] Decide output format (plain text / markdown / rendered PDF) and implement — **markdown** under `output/tailored/`
+- [x] Decide output format: ATS-friendly **DOCX + PDF** (markdown sibling for review) under `output/tailored/`
 - [x] Update status to `tailored`
 - [x] CLI command: `python cli.py run --stage tailor`
 - [x] Test: unit tests cover fact preservation, retry → success, and manual_review path
@@ -101,27 +103,103 @@ Check items off as you go. Tasks are grouped into phases that roughly match the 
 
 ### Phase 9 — Orchestration & CLI Polish
 
-- [ ] Write `pipeline.py`: run stages in sequence, commit per job, isolate per-job failures
-- [ ] Write `cli.py status`: show counts per pipeline stage
-- [ ] Add global run-level error guard (DB connection loss, etc. exits cleanly)
-- [ ] Set up cron (or equivalent scheduler) for discover/score/tailor/cover_letter stages
-- [ ] Confirm resumability: kill a run mid-batch, restart, confirm no duplicate processing
+- [x] Write `pipeline.py`: run stages in sequence, commit per job, isolate per-job failures
+- [x] Write `cli.py status`: show counts per pipeline stage
+- [x] Add global run-level error guard (DB connection loss, etc. exits cleanly)
+- [x] Set up cron (or equivalent scheduler) for discover/score/tailor/cover_letter stages
+- [x] Confirm resumability: kill a run mid-batch, restart, confirm no duplicate processing
 
 ### Phase 10 — Testing & Hardening
 
-- [ ] Unit tests for `discover.py`, `score.py`, `tailor.py`, `form_detector.py` with mocked network/LLM calls
-- [ ] Fixtures: sample resume, sample job postings in `tests/fixtures/`
-- [ ] Run full pipeline against a real but small batch (e.g. 10 jobs) end-to-end
-- [ ] Review logs for a full run — confirm structured logging is actually useful for debugging
-- [ ] Document any board-specific quirks you hit (LinkedIn rate limits, Naukri field gaps, etc.) back into this README
+- [x] Unit tests for `discover.py`, `score.py`, `tailor.py`, `form_detector.py` with mocked network/LLM calls
+- [x] Fixtures: sample resume, sample job postings in `tests/fixtures/` (`sample_resume.txt`, `sample_profile.json`, `jobs/batch10.json`, `forms/*.html`)
+- [x] Run full pipeline against a small 10-job batch end-to-end (mocked JobSpy + LLM in `tests/test_phase10_pipeline_e2e.py`; mixed boards; 8 fit + 2 low-fit; no live employer apply)
+- [x] Review logs for a full run — confirm structured logging is actually useful for debugging (`[Stage: discover]`, `[Transition: …]`, per-stage complete lines)
+- [x] Document any board-specific quirks you hit (LinkedIn rate limits, Naukri field gaps, etc.) back into this README
 
 ### Phase 11 — Nice-to-haves (post-MVP, only after everything above works)
 
-- [ ] Greenhouse / Lever site adapters
-- [ ] Resume rendered as styled PDF instead of plain text
-- [ ] Simple web dashboard instead of CLI-only status
-- [ ] Proxy rotation for higher-volume discovery
-- [ ] Email/Slack notification on new high-score jobs
+- ~~Greenhouse / Lever site adapters~~ — superseded by Tier 2 (`tasklist2.md` / ADR-002)
+- ~~ATS-parseable resume PDF/DOCX~~ — done in Phase 5; still not a **designed/styled** PDF
+- [x] Resume rendered as **styled/designed** PDF (visual layout) — `*.styled.pdf` sibling
+- [x] Simple web dashboard instead of CLI-only status — `python cli.py dashboard`
+- [x] Proxy rotation for higher-volume discovery — `PROXY_URLS` / `PROXY_FILE`
+- [x] Email/Slack notification on new high-score jobs
+
+---
+
+## Status snapshot (keep current)
+
+**Done:** Phases **0–11**. Canonical detail: `readme/tasklist2.md`.
+
+**Next:** none on the checklist (Patchright / CAPTCHA / autonomous submit remain out of scope).
+
+**Deferred / never for MVP:** Patchright, CAPTCHA solving, autonomous submit, multi-user.
+
+---
+
+## Known Limitations & Gaps (do not lose)
+
+*(Phases 0–11 are on the checklist. Canonical copy also lives in `readme/tasklist2.md` — keep both in sync.)*
+
+### Deferred / not built yet
+- [ ] **Patchright stealth** — still on stock Playwright + light stealth JS
+- [x] **Phase 9** — pipeline / status / DB guard / cron (**user crontab installed**); apply/submit stay manual
+- [x] **Phase 10** — mocked 10-job pipeline harden + unit tests + board-quirk docs (no live-employer apply in CI)
+- [x] **Phase 11** — styled PDF, dashboard, proxies, Slack/email alerts
+- [ ] **CAPTCHA solving** — detect-only; no CapSolver / paid solver
+- [ ] **Fully autonomous submit** — human `review --approve` required before `--submit`
+- [ ] **Multi-user / auth / SaaS** — single-operator CLI only
+
+### Apply / browser limitations
+- CAPTCHA / Cloudflare / bot walls → `manual_review` (never solved)
+- SSO / Google / Microsoft / Okta walls → `manual_review` (never invent credentials)
+- Unsafe ID/selfie/biometric or payment/SSN prompts → hard-stop → `manual_review`
+- Blocked hosts (Glassdoor, some Google careers patterns, contractor marketplaces, …) → `skipped`
+- LinkedIn Easy Apply needs logged-in profile: `BROWSER_USER_DATA_DIR`
+- Workday often needs logged-in profile / real Chrome (`BROWSER_CHANNEL=chrome`)
+- Tier 2 headed by default (`TIER2_HEADLESS=false`); costs LLM tokens (`TIER2_MAX_JOBS_PER_RUN` / `TIER2_MAX_AGENT_STEPS`)
+- Lever/Greenhouse location autocomplete improved but still imperfect on sticky widgets
+- Submit loads dry-run **storage_state** then re-fills form fields
+- Re-dry-run **keeps** approval — re-check the new screenshot before `--submit`
+- Phase 8 e2e used a **local HTML** posting, not a live employer Submit
+
+### Discovery / scoring / materials
+- JobSpy **public search only** — not logged-in LinkedIn/Naukri scraping
+- Board rate limits / sparse fields possible (Naukri fields vary)
+- Scoring is LLM+embedding judgment — false positives/negatives expected
+- Tailored resumes: `.docx` (upload) + `.pdf` (ATS text) + `.md` (review) + `.styled.pdf` (designed layout, not uploaded)
+- Jobs already `tailored` with only `.md` need re-tailor for DOCX/PDF
+- Missing tailored resume blocks auto-apply → `manual_review`
+
+### Review / submit / DB ops
+- No batch `--submit` — one approved `--job-id` at a time
+- Reject → job status `skipped` (no dedicated `rejected` status)
+- `python cli.py status` + `python cli.py pipeline` (optional `--include-apply` dry-run only) + `python cli.py dashboard`
+- Cron: every 6h via `scripts/cron_pipeline.sh` on this machine — never `--submit` in cron
+- DBs auto-upgrade via `ensure_schema()` in the CLI/pipeline DB guard
+- Postgres must be reachable if `DATABASE_URL` points at it
+- Always open the screenshot before approving
+
+### ATS routing (current)
+- Tier 1: LinkedIn Easy Apply, Workday, Greenhouse, high-confidence generic
+- Tier 2: Lever / Workable / Ashby / TCS (`tier2_ats`) + unrecognized / low-confidence forms
+- Hostname match is suffix-based (`clever.co` ≠ `lever.co`)
+
+### Board-specific quirks (Phase 10)
+- **LinkedIn discovery:** JobSpy cards omit the body unless `linkedin_fetch_description=True`. Public scrape is rate-limited / often sparse. Easy Apply needs `BROWSER_USER_DATA_DIR`.
+- **Naukri:** `skills` / `experience_range` (and rating / WFH when present) appended as `--- Naukri Specific Info ---`; fields are frequently blank.
+- **Indeed:** Usually the most complete public JobSpy source; still rate-limited.
+- **Greenhouse:** Stays Tier 1 (`boards.greenhouse.io` + `gh_jid=`). Location autocomplete can stick.
+- **Lever:** Tier 2; location autocomplete is flaky; use headed Tier 2 (`TIER2_HEADLESS=false`).
+- **Workday:** Login wall is common without real Chrome + logged-in profile (`BROWSER_CHANNEL=chrome`).
+- **Glassdoor / some Google careers / marketplaces:** blocked → `skipped`.
+- **CI:** live Postgres tests skip when `DATABASE_URL` is down; Phase 10 e2e uses SQLite.
+
+### Explicitly out of product scope (v1)
+- Automated follow-up emails / interview scheduling
+- Deep adapters for every ATS (Tier 2 covers the long tail where configured)
+- Solving CAPTCHAs or creating fake accounts
 
 ---
 
@@ -129,5 +207,10 @@ Check items off as you go. Tasks are grouped into phases that roughly match the 
 
 *(Use this space to jot down anything you learn mid-build — board quirks, prompt tweaks that worked, form edge cases — so it doesn't get lost.)*
 
-- Phase 8: Human review is required before any real Submit. `python cli.py review` lists `apply_pending` jobs with screenshot + resume/cover excerpts. `--approve --job-id` / `--reject --job-id` (or `--interactive`). `--submit` without an approved application raises. Rejected jobs become `skipped`. Low-stakes e2e uses a local HTML posting (no real employer): dry-run → approve → submit → `applied`.
-- Phase 7 vs ApplyPilot: ApplyPilot drives apply via Claude+Playwright MCP (AGPL) + CapSolver. We reimplemented the *behavioral* checklist deterministically — hard stops (`automation/hard_stops.py`), blocked sites/SSO, dry-run submit guard, screenshot audit, tailored-resume gate — without CapSolver or the Claude agent loop.
+- Phase 8: Human review required before Submit. Local HTML e2e only (not a live employer).
+- Phase 9: `pipeline` / `status` / DB guard / cron installed (`0 */6 * * *`). Apply/submit stay manual.
+- Post–Phase 9: `TIER2_HEADLESS`, storage_state, keep approval on re-dry-run, `ensure_schema()`, ATS DOCX+PDF+md (`reportlab`).
+- Phase 7 vs ApplyPilot: behavioral checklist reimplemented without CapSolver / Claude agent loop.
+- Phase 0–9 audit (2026-09-11): MVP complete. Fixed Greenhouse/generic MD→DOCX upload; atomic PDF writes; sibling resume fallback.
+- Phase 11 (2026-09-21): styled `*.styled.pdf`, `cli.py dashboard`, JobSpy proxies, Slack/email high-score alerts.
+- Phase 10 (2026-09-11): Mocked 10-job discover→cover_letter harden; structured logs confirmed; board quirks documented. Remaining gaps: Patchright, CAPTCHA solve, live-employer submit e2e.

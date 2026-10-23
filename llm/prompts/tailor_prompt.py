@@ -37,8 +37,21 @@ Hard constraints (non-negotiable):
 3. You MAY reorder sections, emphasize relevant bullets, trim less-relevant
    bullets, and mirror ATS keywords from the job description — but only when
    those keywords already map to real experience in the profile.
-4. Output markdown suitable for a human to review and for ATS paste.
-5. Include ALL experience achievements, projects, education entries, and skills
+4. Output an ATS-friendly resume in markdown (single column). Use ONLY these
+   section headings, in this order when the profile has content for them:
+     # Full Name
+     City, Region | phone | email | LinkedIn or GitHub as plain text (no markdown links)
+     ## Summary
+     ## Skills
+     ## Experience
+     ### Job Title | Company | Mon YYYY – Mon YYYY (or YYYY)
+     - achievement bullets
+     ## Projects
+     ## Education
+     ## Certifications
+5. ATS layout rules: no tables, no columns, no images, no icons, no text boxes.
+   Spell out skill names. Do not use headers/footers. Dates as Mon YYYY or YYYY.
+6. Include ALL experience achievements, projects, education entries, and skills
    from the profile — do not drop protected fact content to shorten the resume.
 
 PROTECTED resume_facts (must appear unchanged as substrings):
@@ -55,6 +68,6 @@ Description:
 {retry_block}
 Respond with ONLY this JSON object, no markdown fences, no commentary:
 {{
-  "tailored_resume": "<full markdown resume text>",
+  "tailored_resume": "<full ATS-friendly markdown resume text>",
   "emphasis_notes": "<1-2 sentences on what you emphasized for this job>"
 }}"""

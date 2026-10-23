@@ -1,0 +1,9 @@
+# Example crontab entries for JobApplyPro Phase 9
+#
+# 1. Edit with:  crontab -e
+# 2. Adjust ROOT / paths to your machine.
+# 3. Ensure .env + config/profile.json exist; DB is reachable.
+#
+# Every day at 08:00 — discover → score → tailor → cover → apply and Submit
+# (AUTO_SUBMIT=true in .env). CAPTCHA/OTP jobs stay manual_review.
+0 8 * * * /home/user/Project10/scripts/cron_pipeline.sh >> /home/user/Project10/logs/cron_pipeline.log 2>&1

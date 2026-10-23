@@ -1,21 +1,111 @@
 searches:
-  - role: "Software Engineer"
+  # Tuned for ~2 years experience — senior-only US roles mostly YoE-skip.
+  - role: "AI Engineer"
     locations:
       - "Remote"
-      - "San Francisco, CA"
+      - "India"
     site_names:
       - "linkedin"
       - "indeed"
-    hours_old: 72
+    hours_old: 168
+    results_wanted: 12
+    remote_only: false
+
+  - role: "Junior Software Engineer"
+    locations:
+      - "Remote"
+      - "Bangalore"
+    site_names:
+      - "linkedin"
+      - "indeed"
+    hours_old: 168
     results_wanted: 10
-    remote_only: true
+    remote_only: false
 
   - role: "Python Developer"
     locations:
       - "Bangalore"
+      - "Nagpur"
     site_names:
       - "naukri"
-      - "google"
+      - "linkedin"
     hours_old: 168
     results_wanted: 15
+    remote_only: false
+
+  - role: "Machine Learning Engineer"
+    locations:
+      - "India"
+      - "Bangalore"
+      - "Hyderabad"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 12
+    remote_only: false
+
+  - role: "Generative AI Engineer"
+    locations:
+      - "India"
+      - "Remote"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 10
+    remote_only: false
+
+  - role: "Junior AI Engineer"
+    locations:
+      - "India"
+      - "Bangalore"
+      - "Hyderabad"
+      - "Pune"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 10
+    remote_only: false
+
+  - role: "LLM Engineer"
+    locations:
+      - "India"
+      - "Bangalore"
+      - "Remote"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 10
+    remote_only: false
+
+  - role: "Python Developer"
+    locations:
+      - "Hyderabad"
+      - "Pune"
+      - "Remote"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 12
+    remote_only: false
+
+  - role: "AI Developer"
+    locations:
+      - "India"
+      - "Chennai"
+      - "Mumbai"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 12
+    remote_only: false
+
+  - role: "Junior Data Scientist"
+    locations:
+      - "India"
+      - "Bangalore"
+      - "Hyderabad"
+    site_names:
+      - "linkedin"
+    hours_old: 168
+    results_wanted: 10
     remote_only: false

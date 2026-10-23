@@ -111,6 +111,7 @@ class BrowserSession:
         *,
         headless: bool | None = None,
         user_data_dir: str | Path | None = None,
+        storage_state: str | Path | None = None,
         slow_mo_ms: int = 0,
     ):
         settings = get_settings()
@@ -123,6 +124,7 @@ class BrowserSession:
             else settings.browser_user_data_dir
         )
         self.user_data_dir = Path(raw_udir) if raw_udir else None
+        self.storage_state = Path(storage_state) if storage_state else None
         self.slow_mo_ms = slow_mo_ms
         self._pw = None
         self._browser = None
@@ -165,6 +167,9 @@ class BrowserSession:
                 else self._context.new_page()
             )
         else:
+            if self.storage_state and self.storage_state.is_file():
+                context_kwargs["storage_state"] = str(self.storage_state)
+                logger.info("Loading browser storage_state from %s", self.storage_state)
             self._browser = self._pw.chromium.launch(**launch_args)
             self._context = self._browser.new_context(**context_kwargs)
             self._page = self._context.new_page()
@@ -205,7 +210,7 @@ class BrowserSession:
             if "already in use" not in msg and "existing browser session" not in msg:
                 raise
             logger.warning("Persistent profile in use — closing leftover Chrome and retrying")
-            _free_persistent_profile(self.user_data_dir)
+            free_persistent_profile(self.user_data_dir)
             time.sleep(1.2)
             return self._pw.chromium.launch_persistent_context(
                 user_data_dir=str(self.user_data_dir),
@@ -233,6 +238,14 @@ class BrowserSession:
         if self._page is None:
             raise RuntimeError("BrowserSession is not started")
         return self._page
+
+    def adopt_page(self, page) -> None:
+        """Switch the session to a popup (Indeed Apply often opens a new tab)."""
+        self._page = page
+        try:
+            self._page.on("dialog", lambda dialog: dialog.dismiss())
+        except Exception:
+            pass
 
     @property
     def current_url(self) -> str:
@@ -324,6 +337,19 @@ class BrowserSession:
         logger.info("Screenshot saved to %s", path)
         return path
 
+    def save_storage_state(self, path: Path | str) -> Path:
+        """
+        Persist cookies + localStorage so a later submit session can reuse
+        login / ATS draft state from the dry-run (new browser process).
+        """
+        if self._context is None:
+            raise RuntimeError("BrowserSession is not started")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._context.storage_state(path=str(path))
+        logger.info("Saved browser storage_state to %s", path)
+        return path
+
     def click(self, selector: str, *, timeout_ms: int = 10000) -> None:
         self.page.click(selector, timeout=timeout_ms)
 
@@ -340,7 +366,7 @@ class BrowserSession:
         return self.page.query_selector_all(selector)
 
 
-def _free_persistent_profile(user_data_dir: Path) -> None:
+def free_persistent_profile(user_data_dir: Path) -> None:
     """Stop a leftover Chromium that still holds BROWSER_USER_DATA_DIR."""
     needle = f"user-data-dir={user_data_dir}"
     try:

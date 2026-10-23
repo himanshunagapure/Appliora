@@ -115,8 +115,10 @@ def _read_tailored_resume(path: str | None) -> str | None:
         logger.warning("Tailored resume path missing on disk: %s", path)
         return None
     try:
-        return _truncate(p.read_text(encoding="utf-8"), max_chars=6000)
-    except OSError as exc:
+        from automation.resume_upload import read_resume_text
+
+        return _truncate(read_resume_text(p), max_chars=6000)
+    except Exception as exc:
         logger.warning("Could not read tailored resume %s: %s", path, exc)
         return None
 

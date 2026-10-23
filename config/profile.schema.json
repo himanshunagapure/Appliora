@@ -18,6 +18,11 @@
         "portfolio_url": { "type": ["string", "null"] }
       }
     },
+    "location_preferences": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Soft scoring preference (e.g. Nagpur, Remote, WFH). Never a knockout like years of experience."
+    },
     "summary": {
       "type": ["string", "null"],
       "description": "Professional summary / objective, if present on the resume."

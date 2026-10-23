@@ -33,6 +33,9 @@ Score this job from 1 to 10 on fit for this specific candidate, considering:
 - Do their skills and experience actually match what's required (not just adjacent)?
 - Is the seniority level appropriate (not obviously over/under-qualified)?
 - Is this the kind of role/domain they've actually worked in?
+- Location is a preference (see profile), not a knockout: remote / WFH / matching city
+  may score slightly higher; onsite elsewhere slightly lower. Never reject a job
+  only because of location.
 
 Respond with ONLY this JSON object, no markdown fences, no commentary:
 {{

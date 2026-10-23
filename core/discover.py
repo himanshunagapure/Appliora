@@ -40,17 +40,22 @@ def scrape_jobs_with_retry(**kwargs):
     """
     Wrap JobSpy's scrape_jobs inside tenacity's retry mechanism.
     """
-    logger.info(f"Calling JobSpy with parameters: {kwargs}")
+    from utils.proxies import redact_jobspy_kwargs
+
+    logger.info("Calling JobSpy with parameters: %s", redact_jobspy_kwargs(kwargs))
     return scrape_jobs(**kwargs)
 
 
-def run_discovery():
+def run_discovery(session_scope=None):
     """
     Orchestrates the discovery phase. Reads searches from settings,
     scrapes each configured query, filters duplicates, maps fields,
     and commits new listings to the database.
+
+    session_scope is injectable for tests (defaults to get_db_session).
     """
     settings = get_settings()
+    session_scope = session_scope or get_db_session
 
     # Initialize run log
     run_log = RunLog(
@@ -58,7 +63,7 @@ def run_discovery():
         started_at=datetime.datetime.now(datetime.timezone.utc),
     )
 
-    with get_db_session() as session:
+    with session_scope() as session:
         session.add(run_log)
         session.flush()  # flush to get the auto-generated ID without committing yet
         run_log_id = run_log.id
@@ -68,6 +73,13 @@ def run_discovery():
     total_inserted = 0
     total_updated = 0
     errors_occurred = []
+    scrape_index = 0
+
+    from utils.proxies import load_proxies, rotate_proxies
+
+    proxy_pool = load_proxies(settings)
+    if proxy_pool:
+        logger.info("Discovery will rotate %d proxy endpoint(s).", len(proxy_pool))
 
     for search in settings.searches:
         logger.info(f"Processing search role: '{search.role}'")
@@ -80,7 +92,7 @@ def run_discovery():
             try:
                 # linkedin_fetch_description=True is required: LinkedIn search cards
                 # do not include the body; JobSpy must open each job page for text.
-                df = scrape_jobs_with_retry(
+                scrape_kwargs = dict(
                     site_name=search.site_names,
                     search_term=search.role,
                     location=location,
@@ -89,6 +101,10 @@ def run_discovery():
                     is_remote=search.remote_only,
                     linkedin_fetch_description=True,
                 )
+                if proxy_pool:
+                    scrape_kwargs["proxies"] = rotate_proxies(proxy_pool, scrape_index)
+                scrape_index += 1
+                df = scrape_jobs_with_retry(**scrape_kwargs)
 
                 if df is None or df.empty:
                     logger.info(
@@ -100,7 +116,7 @@ def run_discovery():
                     f"Scraped {len(df)} jobs for '{search.role}' in '{location}'"
                 )
 
-                with get_db_session() as session:
+                with session_scope() as session:
                     for _, row in df.iterrows():
                         total_processed += 1
 
@@ -202,7 +218,7 @@ def run_discovery():
                 errors_occurred.append(err_msg)
 
     # Save details into RunLog
-    with get_db_session() as session:
+    with session_scope() as session:
         db_run_log = session.get(RunLog, run_log_id)
         if db_run_log:
             db_run_log.finished_at = datetime.datetime.now(datetime.timezone.utc)
@@ -215,3 +231,9 @@ def run_discovery():
         f"Discovery run complete. Processed {total_processed} jobs, "
         f"inserted {total_inserted} new, backfilled {total_updated} descriptions."
     )
+    return {
+        "processed": total_processed,
+        "inserted": total_inserted,
+        "updated": total_updated,
+        "errors": len(errors_occurred),
+    }

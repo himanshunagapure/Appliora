@@ -62,8 +62,8 @@ ATS_CFG = {
 def main() -> int:
     settings = get_settings()
     settings.tier2_max_agent_steps = max(settings.tier2_max_agent_steps, 45)
-    # Headed reduces bot-wall CAPTCHAs vs the prior headless batch.
-    settings.browser_headless = False
+    # Tier 2 already defaults to headed (TIER2_HEADLESS=false); keep it explicit here.
+    settings.tier2_headless = False
 
     profile = json.loads(PROFILE.read_text(encoding="utf-8"))
     if not RESUME.exists():
@@ -76,7 +76,7 @@ def main() -> int:
     results: list[dict] = []
     print(f"Batch Tier 2 dry-run: {len(JOBS)} jobs, max_steps={settings.tier2_max_agent_steps}")
     print(f"Model: {settings.tier2_llm_model or settings.gemini_model}")
-    print(f"Headless: {settings.browser_headless}\n")
+    print(f"Tier2 headless: {settings.tier2_headless}\n")
 
     for i, job in enumerate(JOBS, 1):
         shot = OUT_DIR / f"live_tier2_batch_{job['id']}.png"

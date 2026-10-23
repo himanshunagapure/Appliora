@@ -114,6 +114,12 @@ class GreenhouseAdapter:
 
         resume_path = materials.get("resume_path")
         if resume_path and Path(resume_path).exists():
+            try:
+                from automation.resume_upload import ensure_uploadable_resume
+
+                resume_path = str(ensure_uploadable_resume(resume_path))
+            except Exception as exc:
+                logger.warning("Greenhouse resume convert skipped: %s", exc)
             for sel in (
                 "input#resume",
                 "input[type='file']#resume",
@@ -142,19 +148,37 @@ class GreenhouseAdapter:
                 except Exception:
                     continue
 
-        if not dry_run and plan.submit_button:
-            try:
-                target.click(plan.submit_button, timeout=5000)
-                return FillResult(
-                    status="submitted",
-                    fields_filled=filled,
-                    fields_skipped=skipped,
-                    adapter=self.name,
-                )
-            except Exception as exc:
+        if not dry_run:
+            # HTML scans miss React submit buttons. Try the detected selector,
+            # then the live button text Greenhouse actually renders.
+            selectors: list[str] = []
+            if plan.submit_button:
+                selectors.append(plan.submit_button)
+            for extra in (
+                "button:has-text('Submit application')",
+                "button:has-text('Submit Application')",
+                "button:has-text('Submit')",
+                "input[type='submit']",
+            ):
+                if extra not in selectors:
+                    selectors.append(extra)
+            last_exc: Exception | None = None
+            for sel in selectors:
+                try:
+                    target.click(sel, timeout=8000)
+                    return FillResult(
+                        status="submitted",
+                        fields_filled=filled,
+                        fields_skipped=skipped,
+                        adapter=self.name,
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if last_exc is not None and (filled or plan.submit_button):
                 return FillResult(
                     status="failed",
-                    error=f"Greenhouse submit failed: {exc}",
+                    error=f"Greenhouse submit failed: {last_exc}",
                     fields_filled=filled,
                     fields_skipped=skipped,
                     adapter=self.name,

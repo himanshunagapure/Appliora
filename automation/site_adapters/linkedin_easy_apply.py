@@ -2,8 +2,9 @@
 LinkedIn Easy Apply adapter.
 
 Requires a logged-in LinkedIn session (persistent browser profile). When a login
-wall appears in headed mode, the browser stays open so you can sign in; the
-session is then reused for later runs via BROWSER_USER_DATA_DIR.
+wall appears, LINKEDIN_EMAIL / LINKEDIN_PASSWORD from .env are used first. If
+those are missing and the browser is headed, the window stays open so you can
+sign in; the session is reused via BROWSER_USER_DATA_DIR.
 
 Dry-run fills the modal steps and stops on the Review page — never clicks
 "Submit application".
@@ -255,38 +256,67 @@ class LinkedInEasyApplyAdapter:
             )
 
         if looks_like_login_wall(html, current_url):
-            if settings.browser_headless:
-                return FillResult(
-                    status="manual_review",
-                    error=(
-                        "login_required: LinkedIn auth wall — set BROWSER_HEADLESS=false "
-                        "and BROWSER_USER_DATA_DIR, then re-run to sign in"
-                    ),
-                    adapter=self.name,
-                )
+            from automation.site_login import try_credential_login
 
-            ok = wait_for_manual_login(
+            login = try_credential_login(
                 page,
-                timeout_sec=settings.browser_login_wait_seconds,
-                job_url=job_url or current_url,
+                site="linkedin",
+                return_url=job_url or current_url,
+                settings=settings,
+                force=True,
             )
-            if not ok:
+            if login.ok:
+                try:
+                    html = page.content()
+                    current_url = page.url or current_url
+                except Exception as exc:
+                    return FillResult(
+                        status="failed",
+                        error=f"Could not read LinkedIn page after login: {exc}",
+                        adapter=self.name,
+                    )
+            elif login.checkpoint or login.captcha:
                 return FillResult(
                     status="manual_review",
                     error=(
-                        "login_required: timed out waiting for LinkedIn sign-in "
-                        f"({settings.browser_login_wait_seconds}s)"
+                        "captcha"
+                        if login.captcha
+                        else "login_required: LinkedIn asked for extra verification after sign-in"
                     ),
                     adapter=self.name,
                 )
-            try:
-                html = page.content()
-            except Exception as exc:
+            elif settings.browser_headless:
                 return FillResult(
-                    status="failed",
-                    error=f"Could not read LinkedIn page after login: {exc}",
+                    status="manual_review",
+                    error=(
+                        "login_required: LinkedIn auth wall — set LINKEDIN_EMAIL and "
+                        "LINKEDIN_PASSWORD in .env (or BROWSER_HEADLESS=false and sign in once)"
+                    ),
                     adapter=self.name,
                 )
+            else:
+                ok = wait_for_manual_login(
+                    page,
+                    timeout_sec=settings.browser_login_wait_seconds,
+                    job_url=job_url or current_url,
+                )
+                if not ok:
+                    return FillResult(
+                        status="manual_review",
+                        error=(
+                            "login_required: timed out waiting for LinkedIn sign-in "
+                            f"({settings.browser_login_wait_seconds}s)"
+                        ),
+                        adapter=self.name,
+                    )
+                try:
+                    html = page.content()
+                except Exception as exc:
+                    return FillResult(
+                        status="failed",
+                        error=f"Could not read LinkedIn page after login: {exc}",
+                        adapter=self.name,
+                    )
             if looks_like_login_wall(html, job_url or current_url):
                 return FillResult(
                     status="manual_review",
@@ -641,7 +671,45 @@ def _fill_external_ats(
             adapter="linkedin_external",
         )
 
+    from automation.agent_apply import is_tier2_ats, should_use_tier2
+    from config.settings import get_settings
+
     plan = build_form_plan(url, html, page=page)
+    settings = get_settings()
+    adapter_guess = (
+        "greenhouse"
+        if greenhouse_mod.adapter.matches(url, html)
+        else "workday"
+        if workday_mod.adapter.matches(url, html)
+        else "generic"
+    )
+    # Ashby / Lever / Workable (and other low-confidence boards) need Tier 2 —
+    # generic fill here would dump them as unrecognized_form forever.
+    if is_tier2_ats(url) or should_use_tier2(
+        url,
+        plan_reason=plan.reason,
+        plan_ats=plan.ats,
+        plan_confidence=plan.confidence,
+        adapter_name=adapter_guess,
+        form_min_confidence=settings.form_min_confidence,
+    ):
+        from automation.agent_apply import run_tier2_apply
+
+        logger.info(
+            "LinkedIn external ATS needs Tier 2 (%s confidence=%.2f) — handing off",
+            url,
+            plan.confidence,
+        )
+        # Close Playwright work on this page; Tier 2 launches its own browser.
+        result = run_tier2_apply(
+            job_url=url,
+            profile=profile,
+            materials=materials,
+            dry_run=dry_run,
+        )
+        result.adapter = f"linkedin_external->{result.adapter or 'browser_use_tier2'}"
+        return result
+
     if greenhouse_mod.adapter.matches(url, html):
         result = greenhouse_mod.adapter.fill(
             page, plan, profile, materials, dry_run=dry_run

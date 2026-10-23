@@ -34,6 +34,19 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if args.stage == "apply" and args.dry_run and args.submit:
+        print("Use only one of --dry-run or --submit.", file=sys.stderr)
+        return 1
+
+    from pipeline import PipelineError, check_database
+
+    try:
+        check_database()
+    except PipelineError as exc:
+        logger.error("%s", exc)
+        print(f"\nRun aborted: {exc}\n", file=sys.stderr)
+        return 1
+
     if args.stage == "discover":
         # Lazy import so `init` (Phase 2) does not require JobSpy at CLI load time.
         from core.discover import run_discovery
@@ -65,6 +78,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"\nScoring stage complete\n"
             f"   Processed:       {summary['processed']}\n"
             f"   Scored:          {summary['scored']}\n"
+            f"   Skipped (YoE):   {summary.get('skipped', 0)}\n"
             f"   Above threshold: {summary['above_threshold']}\n"
             f"   Failed:          {summary['failed']}\n"
         )
@@ -119,10 +133,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     if args.stage == "apply":
-        if args.dry_run and args.submit:
-            print("Use only one of --dry-run or --submit.", file=sys.stderr)
-            return 1
-
         from core.apply import ApplyError, run_apply_stage
 
         dry_run = not args.submit
@@ -155,6 +165,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"   Apply pending:  {summary['apply_pending']}\n"
             f"   Applied:        {summary['applied']}\n"
             f"   Manual review:  {summary['manual_review']}\n"
+            f"   Deferred:       {summary.get('deferred', 0)}\n"
+            f"   Recovered:      {summary.get('recovered', 0)}\n"
             f"   Failed:         {summary['failed']}\n"
             f"   Skipped:        {summary['skipped']}\n"
             f"   Tier 2 agent:   {summary.get('tier2_attempts', 0)}\n"
@@ -163,6 +175,96 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     logger.error("Stage '%s' is not implemented yet in this version.", args.stage)
     return 1
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show live job counts per pipeline stage (Phase 9)."""
+    from pipeline import PipelineError, check_database
+    from core.status import format_status_report, get_status_counts
+
+    try:
+        check_database()
+        data = get_status_counts()
+        print("\n" + format_status_report(data) + "\n")
+        return 0
+    except PipelineError as exc:
+        logger.error("%s", exc)
+        print(f"\nStatus unavailable: {exc}\n", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        logger.error("Status command failed: %s", exc, exc_info=True)
+        print(f"\nStatus failed: {exc}\n", file=sys.stderr)
+        return 1
+
+
+def cmd_pipeline(args: argparse.Namespace) -> int:
+    """Run discover→score→tailor→cover_letter (optional apply dry-run)."""
+    from pipeline import STAGE_RUNNERS, format_pipeline_report, run_pipeline
+
+    stages = None
+    if args.stages is not None:
+        stages = [s.strip().lower() for s in args.stages.split(",") if s.strip()]
+        if not stages:
+            print("--stages is empty. Pass a comma-separated list such as score,tailor.", file=sys.stderr)
+            return 1
+        unknown = [s for s in stages if s not in STAGE_RUNNERS]
+        if unknown:
+            print(
+                f"Unknown stage(s): {', '.join(unknown)}. "
+                f"Valid: {', '.join(STAGE_RUNNERS)}",
+                file=sys.stderr,
+            )
+            return 1
+        if args.include_apply and "apply" not in stages:
+            print(
+                "Note: --include-apply is ignored when --stages is set; "
+                "add 'apply' to --stages if you want dry-run apply.\n",
+                file=sys.stderr,
+            )
+
+    logger.info(
+        "Executing pipeline (include_apply=%s, stages=%s)",
+        args.include_apply,
+        stages or "default",
+    )
+    try:
+        result = run_pipeline(
+            stages=stages,
+            include_apply=bool(args.include_apply),
+            stop_on_error=not args.continue_on_error,
+        )
+    except Exception as exc:
+        logger.error("Pipeline crashed: %s", exc, exc_info=True)
+        print(f"\nPipeline crashed: {exc}\n", file=sys.stderr)
+        return 1
+
+    print("\n" + format_pipeline_report(result) + "\n")
+    return 0 if result.ok else 1
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Serve a local read-only status dashboard (Phase 11)."""
+    from pipeline import PipelineError, check_database
+    from core.dashboard import DEFAULT_HOST, DEFAULT_PORT, serve_dashboard
+    from config.settings import get_settings
+
+    try:
+        check_database()
+    except PipelineError as extra:
+        logger.error("%s", extra)
+        print(f"\nDashboard aborted: {extra}\n", file=sys.stderr)
+        return 1
+
+    settings = get_settings()
+    host = args.host or settings.dashboard_host or DEFAULT_HOST
+    port = int(args.port or settings.dashboard_port or DEFAULT_PORT)
+    try:
+        serve_dashboard(host, port)
+        return 0
+    except OSError as extra:
+        logger.error("Dashboard failed to bind %s:%s: %s", host, port, extra)
+        print(f"\nDashboard failed: {extra}\n", file=sys.stderr)
+        return 1
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -333,6 +435,55 @@ def main() -> int:
         help="Open the screenshot in the default image viewer",
     )
     review_parser.set_defaults(func=cmd_review)
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show job counts per pipeline stage and recent run logs",
+    )
+    status_parser.set_defaults(func=cmd_status)
+
+    pipeline_parser = subparsers.add_parser(
+        "pipeline",
+        help=(
+            "Run discover → score → tailor → cover_letter → apply. "
+            "With AUTO_SUBMIT=true the apply stage clicks Submit."
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--include-apply",
+        action="store_true",
+        default=False,
+        help="Also run apply after cover letters (submits when AUTO_SUBMIT=true)",
+    )
+    pipeline_parser.add_argument(
+        "--stages",
+        default=None,
+        help="Comma-separated stage list override (e.g. score,tailor,cover_letter)",
+    )
+    pipeline_parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        default=False,
+        help="Continue to the next stage after a stage-level failure (default: stop)",
+    )
+    pipeline_parser.set_defaults(func=cmd_pipeline)
+
+    dash_parser = subparsers.add_parser(
+        "dashboard",
+        help="Open a local read-only web dashboard (status + recent jobs)",
+    )
+    dash_parser.add_argument(
+        "--host",
+        default=None,
+        help="Bind address (default: 127.0.0.1 / DASHBOARD_HOST)",
+    )
+    dash_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Port (default: 8765 / DASHBOARD_PORT)",
+    )
+    dash_parser.set_defaults(func=cmd_dashboard)
 
     args = parser.parse_args()
 

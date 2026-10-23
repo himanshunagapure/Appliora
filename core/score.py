@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from config.settings import get_settings
+from core.experience import candidate_years_of_experience, experience_gate
+from core.location import location_preferences, location_score_adjustment
 from db.models import Job, RunLog
 from db.session import get_db_session
 from llm.client import EmbeddingClient, LLMClient, LLMError
@@ -53,6 +55,14 @@ def build_profile_summary(profile: dict[str, Any]) -> str:
     fact-preservation check, not for scoring context).
     """
     lines: list[str] = []
+
+    years = candidate_years_of_experience(profile)
+    lines.append(f"Years of experience: {years:g} years (from resume dates)")
+
+    prefs = location_preferences(profile)
+    lines.append(
+        "Location preference (soft, not a knockout): " + " / ".join(prefs)
+    )
 
     skills = profile.get("skills", [])
     if skills:
@@ -148,6 +158,7 @@ def score_job(
     profile_embedding: list[float],
     embedding_client: EmbeddingClient,
     llm_client: LLMClient,
+    profile: dict[str, Any] | None = None,
 ) -> tuple[float, str]:
     """Returns (final_score, reasoning_text) for a single job."""
     job_text = f"{job_title} at {company}\n{job_description or ''}"
@@ -179,9 +190,14 @@ def score_job(
 
     llm_score = max(1.0, min(10.0, llm_score))
     final_score = combine_score(semantic_similarity, llm_score)
+    loc_delta, loc_note = location_score_adjustment(
+        profile, job_title, job_description or ""
+    )
+    if loc_delta:
+        final_score = round(max(0.0, min(10.0, final_score + loc_delta)), 1)
     reasoning = (
         f"Semantic similarity: {semantic_similarity:.2f} | LLM judged {llm_score:.0f}/10 "
-        f"| {llm_reasoning}"
+        f"| {llm_reasoning} | {loc_note}"
     )
     return final_score, reasoning
 
@@ -211,8 +227,15 @@ def run_scoring_stage(
     profile_summary = build_profile_summary(profile)
     profile_embedding = get_profile_embedding(profile_summary, embedding_client)
 
-    summary = {"processed": 0, "scored": 0, "above_threshold": 0, "failed": 0}
+    summary = {
+        "processed": 0,
+        "scored": 0,
+        "above_threshold": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
     error_messages: list[str] = []
+    high_score_jobs: list[dict[str, Any]] = []
 
     with session_scope() as session:
         run_log = RunLog(stage="score", jobs_processed=0)
@@ -224,6 +247,23 @@ def run_scoring_stage(
 
         for job in discovered_jobs:
             summary["processed"] += 1
+            qualified, yoe_reason = experience_gate(
+                profile, job.title or "", job.description or ""
+            )
+            if not qualified:
+                job.status = "skipped"
+                job.reasoning = yoe_reason
+                job.score = 0.0
+                summary["skipped"] += 1
+                logger.info(
+                    "Skipped job %d (%s at %s): %s",
+                    job.id,
+                    job.title,
+                    job.company,
+                    yoe_reason,
+                )
+                session.commit()
+                continue
             try:
                 score, reasoning = score_job(
                     job_title=job.title,
@@ -233,13 +273,24 @@ def run_scoring_stage(
                     profile_embedding=profile_embedding,
                     embedding_client=embedding_client,
                     llm_client=llm_client,
+                    profile=profile,
                 )
                 job.score = score
-                job.reasoning = reasoning
+                job.reasoning = f"{yoe_reason} | {reasoning}"
                 job.status = "scored"
                 summary["scored"] += 1
                 if score >= settings.score_threshold:
                     summary["above_threshold"] += 1
+                    high_score_jobs.append(
+                        {
+                            "id": job.id,
+                            "title": job.title,
+                            "company": job.company,
+                            "score": score,
+                            "url": job.url,
+                            "source": job.source,
+                        }
+                    )
                 logger.info("Scored job %d (%s at %s): %.1f", job.id, job.title, job.company, score)
             except ScoringError as exc:
                 job.status = "failed"
@@ -254,6 +305,14 @@ def run_scoring_stage(
         run_log.finished_at = datetime.now(timezone.utc)
         run_log.errors = "\n".join(error_messages) if error_messages else None
         session.commit()
+
+    if high_score_jobs:
+        try:
+            from core.notify import notify_high_score_jobs
+
+            notify_high_score_jobs(high_score_jobs)
+        except Exception as exc:
+            logger.warning("High-score notification failed: %s", exc)
 
     logger.info("Scoring stage complete: %s", summary)
     return summary

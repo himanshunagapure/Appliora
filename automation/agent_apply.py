@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import inspect
 import json
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -50,6 +52,9 @@ _SSO_MARKERS = (
     "blocked_sso",
     "okta login",
     "microsoft login",
+    "indeed login",
+    "login/signup",
+    "sign in to indeed",
 )
 
 _FAILURE_MARKERS = (
@@ -66,6 +71,32 @@ _SUCCESS_MARKERS = (
     "stopped before submit",
     "form complete",
     "application ready",
+)
+
+# Narratives that mean the site accepted the application, even when the agent
+# forgets the literal "outcome=submitted" token.
+_SUBMIT_CONFIRMATIONS = (
+    "successfully submitted",
+    "has been submitted",
+    "application was submitted",
+    "submission confirmed",
+    "application was confirmed",
+    "we have received your application",
+    "thank you for applying",
+    "protocolo",
+    "confirmation number",
+)
+
+_SUBMIT_NEGATIONS = (
+    "did not submit",
+    "didn't submit",
+    "was not submitted",
+    "not been submitted",
+    "not submitted",
+    "stopped before submit",
+    "before submission",
+    "without submitting",
+    "final submit was not clicked",
 )
 
 
@@ -118,10 +149,35 @@ def build_agent_task(
         "outcome=filled."
         if dry_run
         else (
-            "Submit the application only after all required fields are filled "
-            "and the form looks correct. Prefer an explicit final Submit control."
+            "Submit the application. After required fields are filled and the "
+            "resume is uploaded, click the final Submit / Submit application / "
+            "Send application button. Do not stop on the review page. "
+            "Report outcome=submitted only after the site confirms the application "
+            "was sent."
         )
     )
+
+    if dry_run:
+        done_criteria = """
+Done criteria (outcome=filled). This is a DRY RUN:
+  - You are on the application FORM (not a job-description Overview page)
+  - Resume uploaded (if a file input exists)
+  - Name, email, and phone filled when those fields exist
+  - Location filled OR skipped after two failed attempts
+  - Visible required questions answered when profile has answers
+  - Final Submit was NOT clicked
+  - Scrolled to top for the audit screenshot
+  Then stop immediately with outcome=filled even if some optional fields remain.
+""".strip()
+    else:
+        done_criteria = """
+Done criteria (outcome=submitted). This is a REAL SUBMIT, not a dry run:
+  - Fill the form as above
+  - Click the final Submit / Submit application / Send application button
+  - Do NOT stop on the Review page
+  - Do NOT say you stopped because of dry-run instructions
+  - Report outcome=submitted only after the site confirms the application was sent
+""".strip()
 
     return f"""
 You are filling a job application form in a real browser.
@@ -173,13 +229,16 @@ Rules:
    Code, Previously worked here, etc.). If a key is not on the page, SKIP it —
    do NOT scroll endlessly hunting for missing profile keys.
 6. At most TWO attempts per field. If a field still fails, leave it and move on.
-7. Location / city autocomplete (Lever, Greenhouse, etc.):
-   - Click the location field
-   - Type ONLY the short city hint above (e.g. "{location_hint or "city"}"), slowly
-   - Wait for the suggestion dropdown
-   - Click the best matching suggestion
-   - If no dropdown appears after the second try, type the city hint as plain text,
-     press Tab or Enter once, and continue — do not keep retrying location
+7. Location / city autocomplete (Lever, Greenhouse, Workable, etc.):
+   - Click the location / city / "Current location" field and clear any placeholder
+   - Type ONLY the short city hint above (e.g. "{location_hint or "city"}"),
+     one short burst — do NOT paste the full address or country
+   - Wait ~1–2 seconds for the suggestion dropdown to appear
+   - Click the best matching suggestion (prefer city + region if listed)
+   - If no dropdown: press ArrowDown then Enter once, or Tab once
+   - If still empty after TWO attempts total, leave location blank and continue —
+     never loop on location; never type country-only or full street address into
+     an autocomplete widget
 8. Batch multiple fill/click actions in one step when possible (name+email+phone).
 9. Prefer truthful answers from the profile. If a required question cannot be
    answered from the profile, leave it blank and note it — do not fabricate.
@@ -187,19 +246,11 @@ Rules:
 11. Before finishing, scroll to the TOP of the application form so the final
     browser screenshot shows the filled name/email/phone/resume area (audit).
 
-Done criteria for dry-run success (outcome=filled):
-  - You are on the application FORM (not a job-description Overview page)
-  - Resume uploaded (if a file input exists)
-  - Name, email, and phone filled when those fields exist
-  - Location filled OR skipped after two failed attempts
-  - Visible required questions answered when profile has answers
-  - Final Submit was NOT clicked
-  - Scrolled to top for the audit screenshot
-  Then stop immediately with outcome=filled even if some optional fields remain.
+{done_criteria}
 
 When finished, your final answer MUST include one of:
-  outcome=filled — form filled enough for human review, stopped before submit
-  outcome=submitted — only if dry-run is false and you actually submitted
+  outcome=filled — form filled, stopped before submit (dry-run only)
+  outcome=submitted — you clicked Submit and the site accepted it
   outcome=captcha — CAPTCHA / bot wall blocked progress
   outcome=sso_required — login wall you cannot pass
   outcome=low_confidence — form too ambiguous or incomplete to trust
@@ -234,8 +285,17 @@ def _core_fields_filled(text: str) -> bool:
     )
     if not acted:
         return False
-    has_name = "full name" in lower or "first name" in lower or "filled the 'full name'" in lower
-    has_email = "email" in lower and ("@" in text or "filled the 'email'" in lower)
+    has_name = any(
+        tok in lower
+        for tok in (
+            "full name",
+            "first name",
+            "legal name",
+            "filled the 'full name'",
+            "name field",
+        )
+    )
+    has_email = "email" in lower and ("@" in text or "filled the 'email'" in lower or "email'" in lower)
     has_phone = "phone" in lower
     has_resume = "resume" in lower and (
         "upload" in lower or "uploaded" in lower or "attach" in lower
@@ -252,20 +312,35 @@ def _core_fields_filled(text: str) -> bool:
         )
     )
     # Require contact trio; resume upload is strong signal when mentioned.
-    return (has_name and has_email and has_phone) or (
+    if (has_name and has_email and has_phone) or (
         has_resume and has_name and has_email
-    ) or (has_resume and has_name and has_phone and stopped)
+    ) or (has_resume and has_name and has_phone and stopped):
+        return True
+    # Agent summaries like "form has been filled … Email … Phone … resume uploaded"
+    if acted and has_email and has_phone and has_resume:
+        return True
+    return False
+
+def _looks_submitted(text: str) -> bool:
+    """True when the agent describes a confirmed submit, not a dry-run fill."""
+    lower = text.lower()
+    if any(tok in lower for tok in _SUBMIT_NEGATIONS):
+        return False
+    return any(tok in lower for tok in _SUBMIT_CONFIRMATIONS)
+
 
 def _parse_outcome(text: str | None) -> str | None:
     if not text:
         return None
     m = re.search(
-        r"outcome\s*=\s*(filled|submitted|captcha|sso_required|low_confidence|failed)",
+        r"outcome\s*=\s*(filled|submitted|captcha|sso_required|low_confidence|failed|expired)",
         text,
         re.IGNORECASE,
     )
     if m:
         return m.group(1).lower()
+    if _looks_submitted(text):
+        return "submitted"
     lower = text.lower()
     # Prefer success phrasing over incidental words like "log in" / "failed".
     if any(tok in lower for tok in _SUCCESS_MARKERS):
@@ -279,9 +354,24 @@ def _parse_outcome(text: str | None) -> str | None:
             "partially filled",
             "as requested",
             "did not submit",
+            "form has been filled",
+            "application form has been filled",
+            "resume file",
+            "was uploaded",
         )
     ):
         return "filled"
+    if any(
+        tok in lower
+        for tok in (
+            "job has expired",
+            "this job has expired",
+            "job posting at the provided url has expired",
+            "no longer accepting applications",
+            "this job is closed",
+        )
+    ):
+        return "expired"
     if "low confidence" in lower or "too ambiguous" in lower:
         return "low_confidence"
     if any(tok in lower for tok in _CAPTCHA_MARKERS) or "outcome=captcha" in lower:
@@ -353,6 +443,13 @@ def _history_to_fill_result(
         return FillResult(
             status="manual_review",
             error="sso_required",
+            screenshot_path=screenshot_path,
+            adapter=ADAPTER_NAME,
+        )
+    if outcome == "expired":
+        return FillResult(
+            status="expired",
+            error="expired: job closed / not accepting applications",
             screenshot_path=screenshot_path,
             adapter=ADAPTER_NAME,
         )
@@ -468,6 +565,68 @@ def _persist_screenshot(
     return str(last) if last else None
 
 
+def _chrome_executable() -> str | None:
+    settings = get_settings()
+    channel = str(getattr(settings, "browser_channel", "") or "").strip().lower()
+    if channel not in {"chrome", "chromium", "chrome-beta"}:
+        return None
+    candidates = (
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+        "/opt/google/chrome/chrome",
+    )
+    for path in candidates:
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def _browser_use_kwargs(
+    *,
+    headless: bool,
+    user_data_dir: str | Path | None,
+) -> dict[str, Any]:
+    """Build Browser() kwargs, dropping names this browser-use version rejects."""
+    from browser_use import Browser
+
+    kwargs: dict[str, Any] = {"headless": headless}
+    if user_data_dir:
+        kwargs["user_data_dir"] = str(user_data_dir)
+    exe = _chrome_executable()
+    if exe:
+        kwargs["executable_path"] = exe
+    try:
+        accepted = set(inspect.signature(Browser).parameters)
+    except (TypeError, ValueError):
+        accepted = set()
+    if accepted:
+        kwargs = {k: v for k, v in kwargs.items() if k in accepted or k == "headless"}
+    return kwargs
+
+
+def _is_browser_start_timeout(exc: BaseException) -> bool:
+    msg = str(exc)
+    lowered = msg.lower()
+    return "BrowserStartEvent" in msg or (
+        "timed out" in lowered and "browser" in lowered
+    )
+
+
+def _tier2_profile_dir(settings: Any) -> Path | None:
+    """Dedicated profile for the agent — never the Playwright BROWSER_USER_DATA_DIR."""
+    raw = getattr(settings, "tier2_user_data_dir", None)
+    if not isinstance(raw, (str, Path)) or raw in {"", None}:
+        return None
+    path = Path(raw)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return path
+    return path
+
+
 async def _default_run_agent(
     *,
     task: str,
@@ -477,6 +636,7 @@ async def _default_run_agent(
     headless: bool,
     user_data_dir: str | Path | None,
     cover_letter_path: str | None = None,
+    dry_run: bool = True,
 ) -> Any:
     """Construct and run a real browser-use Agent (lazy import)."""
     settings = get_settings()
@@ -488,10 +648,7 @@ async def _default_run_agent(
     model = (settings.tier2_llm_model or "").strip() or settings.gemini_model
     llm = ChatGoogle(model=model, api_key=settings.gemini_api_key)
 
-    browser_kwargs: dict[str, Any] = {"headless": headless}
-    if user_data_dir:
-        browser_kwargs["user_data_dir"] = str(user_data_dir)
-    browser = Browser(**browser_kwargs)
+    browser = Browser(**_browser_use_kwargs(headless=headless, user_data_dir=user_data_dir))
 
     available_files = [p for p in (resume_path, cover_letter_path) if p]
     agent = Agent(
@@ -508,9 +665,15 @@ async def _default_run_agent(
             "On job application forms: if you land on a job Overview, click Apply "
             "or open the Application tab first. Fill several visible fields in one "
             "step. Never hunt for profile keys that are not on the page. For location "
-            "autocomplete, type a short city name, pick a suggestion, and move on "
-            "after at most two attempts. Before done, scroll to the top of the form "
-            "for the audit screenshot. In dry-run never click Submit."
+            "autocomplete: clear the field, type only a short city name (not full "
+            "address), wait for suggestions, click one; if none after two tries, "
+            "ArrowDown+Enter or Tab once then move on — never loop on location. "
+            "Before done, scroll to the top of the form for the audit screenshot. "
+            + (
+                "This is a DRY RUN: never click the final Submit button."
+                if dry_run
+                else "This is a REAL application: after the form is complete, click the final Submit button. Do not stop on Review."
+            )
         ),
     )
     _ = job_url  # URL is embedded in the task; Agent navigates itself.
@@ -581,12 +744,14 @@ def run_tier2_apply(
         )
 
     # Consume budget only once we are actually going to call the agent.
+    # Remaining jobs stay cover_letter_ready (deferred) so the next apply run
+    # can try them — dumping them into manual_review was a false "needs human".
     if budget is not None and not budget.try_consume():
         return FillResult(
-            status="manual_review",
+            status="deferred",
             error=(
                 f"tier2_budget_exhausted: max {budget.max_jobs} Tier 2 jobs per run "
-                f"(TIER2_MAX_JOBS_PER_RUN)"
+                f"(TIER2_MAX_JOBS_PER_RUN); leaving job queued"
             ),
             adapter=ADAPTER_NAME,
         )
@@ -601,46 +766,74 @@ def run_tier2_apply(
     )
     runner = agent_runner or _default_run_agent
     max_steps = settings.tier2_max_agent_steps
+    # Tier 2 defaults to headed (TIER2_HEADLESS=false) — independent of BROWSER_HEADLESS.
+    raw_headless = getattr(settings, "tier2_headless", False)
+    tier2_headless = raw_headless if isinstance(raw_headless, bool) else False
+    if tier2_headless:
+        logger.warning(
+            "Tier 2 running headless (TIER2_HEADLESS=true) — CAPTCHA / bot walls "
+            "are more likely; prefer headed for live ATS"
+        )
+    else:
+        logger.info("Tier 2 using headed browser (TIER2_HEADLESS=false)")
+
+    profile_dir = _tier2_profile_dir(settings)
+
+    def _call_runner(udir: str | Path | None) -> Any:
+        kwargs: dict[str, Any] = {
+            "task": task,
+            "job_url": job_url,
+            "resume_path": materials.get("resume_path"),
+            "max_steps": max_steps,
+            "headless": tier2_headless,
+            "user_data_dir": udir,
+            "cover_letter_path": materials.get("cover_letter_path"),
+            "dry_run": dry_run,
+        }
+        try:
+            return _run_async(lambda: runner(**kwargs))
+        except TypeError:
+            kwargs.pop("cover_letter_path", None)
+            kwargs.pop("dry_run", None)
+            return _run_async(lambda: runner(**kwargs))
 
     try:
-        history = _run_async(
-            lambda: runner(
-                task=task,
-                job_url=job_url,
-                resume_path=materials.get("resume_path"),
-                max_steps=max_steps,
-                headless=settings.browser_headless,
-                user_data_dir=settings.browser_user_data_dir,
-                cover_letter_path=materials.get("cover_letter_path"),
+        history = _call_runner(profile_dir)
+    except Exception as exc:
+        if _is_browser_start_timeout(exc):
+            logger.warning(
+                "Tier 2 browser start timed out for %s — retrying with a fresh profile",
+                job_url,
             )
-        )
-    except TypeError:
-        # Test doubles may not accept cover_letter_path.
-        try:
-            history = _run_async(
-                lambda: runner(
-                    task=task,
-                    job_url=job_url,
-                    resume_path=materials.get("resume_path"),
-                    max_steps=max_steps,
-                    headless=settings.browser_headless,
-                    user_data_dir=settings.browser_user_data_dir,
+            if profile_dir is not None:
+                try:
+                    from automation.browser import free_persistent_profile
+
+                    free_persistent_profile(Path(profile_dir))
+                except Exception:
+                    logger.debug("Could not free Tier 2 profile lock", exc_info=True)
+            time.sleep(1.5)
+            try:
+                history = _call_runner(None)
+            except Exception as retry_exc:
+                logger.error(
+                    "Tier 2 agent failed for %s after retry: %s",
+                    job_url,
+                    retry_exc,
+                    exc_info=True,
                 )
-            )
-        except Exception as exc:
+                return FillResult(
+                    status="manual_review",
+                    error=f"tier2_error: {retry_exc}",
+                    adapter=ADAPTER_NAME,
+                )
+        else:
             logger.error("Tier 2 agent failed for %s: %s", job_url, exc, exc_info=True)
             return FillResult(
                 status="manual_review",
                 error=f"tier2_error: {exc}",
                 adapter=ADAPTER_NAME,
             )
-    except Exception as exc:
-        logger.error("Tier 2 agent failed for %s: %s", job_url, exc, exc_info=True)
-        return FillResult(
-            status="manual_review",
-            error=f"tier2_error: {exc}",
-            adapter=ADAPTER_NAME,
-        )
 
     shot = _persist_screenshot(history, screenshot_path)
     result = _history_to_fill_result(history, dry_run=dry_run, screenshot_path=shot)

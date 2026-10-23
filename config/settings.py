@@ -48,12 +48,38 @@ class Settings(BaseSettings):
 
     # Phase 7 — browser / form fill
     browser_headless: bool = Field(default=True, validation_alias="BROWSER_HEADLESS")
+    # Tier 2 defaults to headed (CAPTCHA / bot walls are far worse headless).
+    # Set TIER2_HEADLESS=true only when you intentionally want headless agents.
+    tier2_headless: bool = Field(default=False, validation_alias="TIER2_HEADLESS")
     browser_user_data_dir: Path | None = Field(
         default=None, validation_alias="BROWSER_USER_DATA_DIR"
+    )
+    # Isolated Chrome profile for browser-use. Sharing BROWSER_USER_DATA_DIR with
+    # Playwright leaves SingletonLock held and Tier 2 dies on BrowserStartEvent (30s).
+    tier2_user_data_dir: Path | None = Field(
+        default=PROJECT_ROOT / "output" / "browser_tier2_profile",
+        validation_alias="TIER2_USER_DATA_DIR",
+    )
+    browser_state_dir: Path = Field(
+        default=PROJECT_ROOT / "output" / "browser_state",
+        validation_alias="BROWSER_STATE_DIR",
     )
     # When headed + LinkedIn auth wall: seconds to wait for you to sign in before giving up.
     browser_login_wait_seconds: int = Field(
         default=180, validation_alias="BROWSER_LOGIN_WAIT_SECONDS"
+    )
+    # Optional job-board passwords — used only when the persistent profile is logged out.
+    linkedin_email: str = Field(default="", validation_alias="LINKEDIN_EMAIL")
+    linkedin_password: str = Field(
+        default="", validation_alias="LINKEDIN_PASSWORD", repr=False
+    )
+    naukri_email: str = Field(default="", validation_alias="NAUKRI_EMAIL")
+    naukri_password: str = Field(
+        default="", validation_alias="NAUKRI_PASSWORD", repr=False
+    )
+    indeed_email: str = Field(default="", validation_alias="INDEED_EMAIL")
+    indeed_password: str = Field(
+        default="", validation_alias="INDEED_PASSWORD", repr=False
     )
     # e.g. "chrome" to use installed Google Chrome (Workday often rejects bundled Chromium).
     browser_channel: str | None = Field(default=None, validation_alias="BROWSER_CHANNEL")
@@ -61,10 +87,15 @@ class Settings(BaseSettings):
         default=0.55, validation_alias="FORM_MIN_CONFIDENCE"
     )
 
+    # When true, the scheduled pipeline fills forms and clicks Submit.
+    # CAPTCHA, OTP, payment, and ID checks still stop as manual_review.
+    # Set AUTO_SUBMIT=false to go back to dry-run (no Submit click).
+    auto_submit: bool = Field(default=True, validation_alias="AUTO_SUBMIT")
+
     # Phase 7 Tier 2 — browser-use agent (costs LLM tokens per attempt)
     tier2_enabled: bool = Field(default=True, validation_alias="TIER2_ENABLED")
     tier2_max_jobs_per_run: int = Field(
-        default=5, validation_alias="TIER2_MAX_JOBS_PER_RUN"
+        default=15, validation_alias="TIER2_MAX_JOBS_PER_RUN"
     )
     tier2_max_agent_steps: int = Field(
         default=50, validation_alias="TIER2_MAX_AGENT_STEPS"
@@ -73,6 +104,25 @@ class Settings(BaseSettings):
     tier2_llm_model: str = Field(
         default="", validation_alias="TIER2_LLM_MODEL"
     )
+
+    # Phase 11 — proxy rotation for JobSpy (optional)
+    proxy_urls: str = Field(default="", validation_alias="PROXY_URLS")
+    proxy_file: str = Field(default="", validation_alias="PROXY_FILE")
+
+    # Phase 11 — alerts on newly scored high-fit jobs (optional)
+    notify_slack_webhook_url: str = Field(
+        default="", validation_alias="NOTIFY_SLACK_WEBHOOK_URL"
+    )
+    notify_email_to: str = Field(default="", validation_alias="NOTIFY_EMAIL_TO")
+    notify_email_from: str = Field(default="", validation_alias="NOTIFY_EMAIL_FROM")
+    notify_smtp_host: str = Field(default="", validation_alias="NOTIFY_SMTP_HOST")
+    notify_smtp_port: int = Field(default=587, validation_alias="NOTIFY_SMTP_PORT")
+    notify_smtp_user: str = Field(default="", validation_alias="NOTIFY_SMTP_USER")
+    notify_smtp_password: str = Field(default="", validation_alias="NOTIFY_SMTP_PASSWORD")
+
+    # Phase 11 — local dashboard
+    dashboard_host: str = Field(default="127.0.0.1", validation_alias="DASHBOARD_HOST")
+    dashboard_port: int = Field(default=8765, validation_alias="DASHBOARD_PORT")
 
     searches: List[SearchConfig] = []
 

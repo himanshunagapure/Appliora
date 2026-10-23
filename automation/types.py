@@ -47,7 +47,7 @@ class FormPlan:
 class FillResult:
     """Outcome of a single dry-run fill or submit attempt."""
 
-    status: str  # filled | submitted | manual_review | failed | expired | skipped
+    status: str  # filled | submitted | manual_review | failed | expired | skipped | deferred
     screenshot_path: str | None = None
     error: str | None = None
     fields_filled: list[str] = field(default_factory=list)

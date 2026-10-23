@@ -3,10 +3,14 @@ Phase 7 — Application Automation (FR6)
 
 Dry-run (default): for each job in status="cover_letter_ready", open the apply
 URL, pick an ATS adapter, fill what we can, screenshot, set status="apply_pending".
+Does not click Submit.
 
-Submit (explicit): only with --job-id for an *approved* apply_pending job
-(Phase 8: `python cli.py review --approve --job-id <id>` first). Clicks final
-Submit. Status becomes applied or failed.
+Unattended submit (AUTO_SUBMIT=true / auto=True): cover_letter_ready and
+apply_pending jobs are filled and Submit is clicked. No per-job approval.
+CAPTCHA, OTP, payment, and ID checks still stop as manual_review.
+
+One-job submit (explicit): `--submit --job-id` still requires an approved
+apply_pending job.
 
 Cascade (ADR-002):
   Tier 1 — deterministic adapters (LinkedIn / Workday / Greenhouse / confident
@@ -24,9 +28,11 @@ Behavioral hard stops (aligned with ApplyPilot ideas, reimplemented):
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from automation.agent_apply import (
     Tier2Budget,
@@ -41,12 +47,14 @@ from automation.hard_stops import (
     hard_stop_to_fill_status,
     is_url_blocked,
 )
+from automation.site_login import try_credential_login
 from automation.site_adapters import generic as generic_adapter
 from automation.site_adapters import greenhouse as greenhouse_adapter
 from automation.site_adapters import linkedin_easy_apply as linkedin_adapter
 from automation.site_adapters import workday as workday_adapter
 from automation.types import FillResult
 from config.settings import get_settings
+from core.experience import experience_gate
 from core.review import is_application_approved
 from core.tailor import load_profile
 from db.models import Application, Job, RunLog
@@ -56,6 +64,37 @@ from utils.logger import get_logger
 
 logger = get_logger("jobapplypro.apply")
 
+# Job aggregators that rarely host the real ATS form. Click Apply first so we
+# can fill Greenhouse/Workday/LinkedIn with Tier 1 instead of dumping to Tier 2.
+_JOB_BOARD_HOSTS = (
+    "indeed.com",
+    "naukri.com",
+    "glassdoor.com",
+    "simplyhired.com",
+)
+
+_JOB_BOARD_APPLY_SELECTORS = [
+    "button#indeedApplyButton",
+    "[data-testid='indeedApplyButton']",
+    "button[aria-label*='Apply now' i]",
+    "a[aria-label*='Apply now' i]",
+    "button:has-text('Apply on company site')",
+    "a:has-text('Apply on company site')",
+    "button:has-text('Apply now')",
+    "a:has-text('Apply now')",
+    "button:has-text('Easy Apply')",
+    "a:has-text('Easy Apply')",
+    "[data-testid*='apply' i]",
+]
+
+# False manual_review from the last apply bugs — reset so dry-run can retry.
+_RETRYABLE_MANUAL_REVIEW_MARKERS = (
+    "tier2_budget_exhausted",
+    "BrowserStartEvent",
+    "timed out after 30",
+    "Event handler BrowserStartEvent",
+)
+
 
 class ApplyError(RuntimeError):
     """Raised for stage-level abort conditions (e.g. submit without job_id)."""
@@ -64,6 +103,117 @@ class ApplyError(RuntimeError):
 def _slugify(text: str, max_len: int = 40) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
     return (slug or "job")[:max_len]
+
+
+def browser_state_path_for_job(job_id: int) -> Path:
+    """Per-job Playwright storage_state path (cookies/localStorage for submit continuity)."""
+    settings = get_settings()
+    base = Path(getattr(settings, "browser_state_dir", None) or "output/browser_state")
+    return base / f"job_{job_id}.json"
+
+
+def is_job_board_url(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return any(host == h or host.endswith(f".{h}") for h in _JOB_BOARD_HOSTS)
+
+
+def is_retryable_manual_review(text: str | None) -> bool:
+    """Budget lock / Chrome-start timeouts are operational, not 'needs a human'.
+
+    Only the latest Apply(...) note counts — older BrowserStart failures must
+    not keep re-queuing a job that later hit captcha or a real login wall.
+    """
+    blob = text or ""
+    apply_notes = [ln for ln in blob.splitlines() if "Apply(" in ln]
+    last = apply_notes[-1] if apply_notes else blob
+    lowered = last.lower()
+    if any(
+        token in lowered
+        for token in ("captcha", "sso_required", "login_timeout", "missing_materials")
+    ) and "tier2_budget_exhausted" not in last:
+        return False
+    return any(marker in last for marker in _RETRYABLE_MANUAL_REVIEW_MARKERS)
+
+
+def recover_retryable_manual_reviews(session) -> int:
+    """Put wrongly queued jobs back to cover_letter_ready for the next dry-run."""
+    jobs = session.query(Job).filter(Job.status == "manual_review").all()
+    recovered = 0
+    for job in jobs:
+        if not is_retryable_manual_review(job.reasoning):
+            continue
+        job.status = "cover_letter_ready"
+        note = "recovered from retryable manual_review (budget/browser-start)"
+        job.reasoning = f"{job.reasoning}\n{note}" if job.reasoning else note
+        recovered += 1
+    if recovered:
+        logger.info(
+            "Recovered %d job(s) from manual_review (budget/browser-start timeouts)",
+            recovered,
+        )
+    return recovered
+
+
+def follow_job_board_apply(browser) -> bool:
+    """
+    Click Apply on Indeed/Naukri/etc. and stay on whatever ATS tab opens.
+
+    Returns True when the URL changed (company site / apply form).
+    """
+    page = getattr(browser, "page", None)
+    if page is None or not hasattr(page, "locator"):
+        return False
+    try:
+        start = (getattr(page, "url", None) or getattr(browser, "current_url", "") or "").rstrip("/")
+    except Exception:
+        start = ""
+
+    for selector in _JOB_BOARD_APPLY_SELECTORS:
+        loc = page.locator(selector).first
+        try:
+            if loc.count() == 0:
+                continue
+            if not loc.is_visible(timeout=1200):
+                continue
+        except Exception:
+            continue
+
+        popup = None
+        try:
+            try:
+                with page.expect_popup(timeout=5000) as pop_info:
+                    loc.click(timeout=5000)
+                popup = pop_info.value
+            except Exception:
+                loc.click(timeout=5000)
+        except Exception as exc:
+            logger.debug("Job-board Apply selector %s failed: %s", selector, exc)
+            continue
+
+        try:
+            if popup is not None:
+                popup.wait_for_load_state("domcontentloaded", timeout=20000)
+                if hasattr(browser, "adopt_page"):
+                    browser.adopt_page(popup)
+                else:
+                    browser._page = popup
+            else:
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                wait = getattr(browser, "wait_until_settled", None)
+                if callable(wait):
+                    wait(timeout_ms=8000)
+        except Exception as exc:
+            logger.debug("After Apply click wait failed: %s", exc)
+
+        try:
+            new_url = (browser.page.url if hasattr(browser, "page") else "") or ""
+        except Exception:
+            new_url = getattr(browser, "current_url", "") or ""
+        if new_url.rstrip("/") and new_url.rstrip("/") != start:
+            logger.info("Job-board Apply navigated %s → %s", start, new_url)
+            return True
+
+    return False
 
 
 def select_adapter(url: str, html: str = ""):
@@ -92,11 +242,24 @@ def _materials_for_application(
     }
     if application and application.tailored_resume_path:
         path = Path(application.tailored_resume_path)
+        if not path.exists():
+            # Prefer sibling DOCX/PDF/MD if the stored path was deleted or is stale.
+            for alt in (
+                path.with_suffix(".docx"),
+                path.with_suffix(".pdf"),
+                path.with_suffix(".md"),
+                path.with_suffix(".txt"),
+            ):
+                if alt.exists() and alt != path:
+                    path = alt
+                    break
         materials["resume_path"] = str(path) if path.exists() else None
-        if path.exists() and path.suffix.lower() in {".md", ".txt", ".markdown"}:
+        if path.exists():
             try:
-                materials["tailored_resume_text"] = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+                from automation.resume_upload import read_resume_text
+
+                materials["tailored_resume_text"] = read_resume_text(path)
+            except Exception:
                 pass
     if application and application.cover_letter_path:
         path = Path(application.cover_letter_path)
@@ -252,8 +415,36 @@ def apply_to_job(
             )
 
         route_tier2 = False
-        with factory() as browser:
+        state_path = browser_state_path_for_job(job.id)
+        # Reuse dry-run cookies/localStorage on submit (and on re-dry-run).
+        factory_kwargs: dict[str, Any] = {}
+        if state_path.is_file():
+            factory_kwargs["storage_state"] = state_path
+            logger.info(
+                "Job %d loading prior browser storage_state from %s",
+                job.id,
+                state_path,
+            )
+
+        with factory(**factory_kwargs) as browser:
             browser.goto(job.url)
+
+            login = try_credential_login(
+                browser.page,
+                return_url=job.url,
+                settings=settings,
+            )
+            if login.checkpoint or login.captcha:
+                shot = _save_screenshot(browser.page, job, screenshot_dir, browser)
+                return FillResult(
+                    status="manual_review",
+                    error=(
+                        "captcha"
+                        if login.captcha
+                        else "login_required: verification challenge after sign-in"
+                    ),
+                    screenshot_path=str(shot) if shot else None,
+                )
 
             # SSO redirect after navigation?
             current = browser.current_url
@@ -300,9 +491,75 @@ def apply_to_job(
                 )
 
             adapter = select_adapter(job.url, html)
+            listing_url = current or job.url
+
+            # Indeed/Naukri listings are not the ATS. Click Apply in this same
+            # Playwright session so Greenhouse/Workday can stay on Tier 1.
+            if is_job_board_url(listing_url) and (
+                should_use_tier2(
+                    listing_url,
+                    plan_reason=plan.reason,
+                    plan_ats=plan.ats,
+                    plan_confidence=plan.confidence,
+                    adapter_name=adapter.name,
+                    form_min_confidence=settings.form_min_confidence,
+                    ats_config=ats_config,
+                )
+                or plan.apply_button
+            ):
+                logger.info(
+                    "Job %d is a job-board listing (%s) — clicking Apply before Tier 2",
+                    job.id,
+                    listing_url,
+                )
+                if follow_job_board_apply(browser):
+                    current = browser.current_url or listing_url
+                    html = browser.content()
+                    if browser.detect_captcha(ats_config.get("captcha_signals")):
+                        shot = _save_screenshot(
+                            browser.page, job, screenshot_dir, browser
+                        )
+                        return FillResult(
+                            status="manual_review",
+                            error="captcha",
+                            screenshot_path=str(shot) if shot else None,
+                        )
+                    stop = detect_hard_stop(current, html, ats_config=ats_config)
+                    if stop is not None:
+                        shot = _save_screenshot(
+                            browser.page, job, screenshot_dir, browser
+                        )
+                        return _result_from_hard_stop(
+                            stop, str(shot) if shot else None
+                        )
+                    plan = build_form_plan(
+                        current,
+                        html,
+                        page=browser.page,
+                        llm_client=llm_client,
+                        use_llm=use_llm_detection,
+                    )
+                    if plan.reason in {"captcha", "sso_required"}:
+                        shot = _save_screenshot(
+                            browser.page, job, screenshot_dir, browser
+                        )
+                        return FillResult(
+                            status="manual_review",
+                            error=plan.reason,
+                            screenshot_path=str(shot) if shot else None,
+                            adapter=plan.ats,
+                        )
+                    adapter = select_adapter(current, html)
+                    logger.info(
+                        "Job %d after Apply click: url=%s adapter=%s confidence=%.2f",
+                        job.id,
+                        current,
+                        adapter.name,
+                        plan.confidence,
+                    )
 
             if should_use_tier2(
-                job.url,
+                current or job.url,
                 plan_reason=plan.reason,
                 plan_ats=plan.ats,
                 plan_confidence=plan.confidence,
@@ -366,9 +623,22 @@ def apply_to_job(
                 shot = _save_screenshot(browser.page, job, screenshot_dir, browser)
                 result.screenshot_path = str(shot) if shot else result.screenshot_path
                 result.adapter = result.adapter or adapter.name
+                # Persist cookies/localStorage so submit (new process) is not cold.
+                if result.status in {"filled", "submitted"}:
+                    try:
+                        browser.save_storage_state(state_path)
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not save storage_state for job %d: %s",
+                            job.id,
+                            exc,
+                        )
                 return result
 
         if route_tier2:
+            # Persistent Playwright Chrome holds SingletonLock; wait before browser-use.
+            if getattr(settings, "browser_user_data_dir", None):
+                time.sleep(1.5)
             return _run_tier2(
                 job=job,
                 profile=profile,
@@ -398,6 +668,9 @@ def _map_result_to_job_status(result: FillResult, *, submit: bool) -> tuple[str,
         return "applied", "applied"
     if result.status == "manual_review":
         return "manual_review", "manual_review"
+    if result.status == "deferred":
+        # Stay eligible for the next apply dry-run (do not burn as manual_review).
+        return "cover_letter_ready", "deferred"
     if result.status == "skipped":
         return "skipped", "skipped"
     if result.status == "expired":
@@ -410,6 +683,7 @@ def run_apply_stage(
     *,
     dry_run: bool = True,
     submit: bool = False,
+    auto: bool = False,
     job_id: int | None = None,
     session_scope: Callable | None = None,
     browser_factory: Callable[..., BrowserSession] | None = None,
@@ -420,17 +694,23 @@ def run_apply_stage(
     tier2_runner: Callable[..., Any] | None = None,
 ) -> dict[str, int]:
     """
-    Orchestrate dry-run fills (or a single submit).
+    Fill applications and, when submit/auto is set, click Submit.
 
-    dry_run=True (default): process cover_letter_ready → apply_pending
-    submit=True: require job_id of an approved apply_pending job → applied/failed
+    dry_run=True: cover_letter_ready → apply_pending (no Submit click).
+    submit=True with a job_id: one approved apply_pending job → applied.
+    auto=True: every cover_letter_ready and apply_pending job is filled and
+    submitted. No per-job approval. CAPTCHA / OTP / payment still stop.
     """
-    if submit and dry_run:
+    if auto:
+        submit = True
+        dry_run = False
+    elif submit and dry_run:
         dry_run = False
 
-    if submit and job_id is None:
+    if submit and not auto and job_id is None:
         raise ApplyError(
-            "Submit mode requires --job-id <id> of an approved apply_pending job"
+            "Submit mode requires --job-id <id> of an approved apply_pending job. "
+            "For unattended submit set AUTO_SUBMIT=true (pipeline) or pass auto=True."
         )
 
     settings = get_settings()
@@ -451,6 +731,8 @@ def run_apply_stage(
         "manual_review": 0,
         "failed": 0,
         "skipped": 0,
+        "deferred": 0,
+        "recovered": 0,
         "tier2_attempts": 0,
     }
     error_messages: list[str] = []
@@ -463,9 +745,15 @@ def run_apply_stage(
         session.add(run_log)
         session.flush()
 
+        if not submit:
+            summary["recovered"] = recover_retryable_manual_reviews(session)
+            session.flush()
+
         query = session.query(Job)
         if job_id is not None:
             query = query.filter(Job.id == job_id)
+        elif auto:
+            query = query.filter(Job.status.in_(("cover_letter_ready", "apply_pending")))
         elif submit:
             query = query.filter(Job.status == "apply_pending")
         else:
@@ -490,19 +778,37 @@ def run_apply_stage(
                 .one_or_none()
             )
 
-            if submit and job.status != "apply_pending":
+            if submit and not auto and job.status != "apply_pending":
                 raise ApplyError(
                     f"job {job.id}: submit refused — status is {job.status!r}, "
                     f"expected 'apply_pending'"
                 )
 
-            if submit and not is_application_approved(application):
+            if submit and not auto and not is_application_approved(application):
                 raise ApplyError(
                     f"job {job.id}: submit refused — not approved. "
                     f"Run `python cli.py review --approve --job-id {job.id}` first"
                 )
 
-            if not submit and job.status != "cover_letter_ready" and job_id is None:
+            if (
+                not submit
+                and not auto
+                and job.status != "cover_letter_ready"
+                and job_id is None
+            ):
+                summary["skipped"] += 1
+                session.commit()
+                continue
+
+            qualified, yoe_reason = experience_gate(
+                profile, job.title or "", job.description or ""
+            )
+            if not qualified:
+                logger.info("Job %d skipped (years of experience): %s", job.id, yoe_reason)
+                job.status = "skipped"
+                job.reasoning = (
+                    f"{job.reasoning}\n{yoe_reason}" if job.reasoning else yoe_reason
+                )
                 summary["skipped"] += 1
                 session.commit()
                 continue
@@ -570,20 +876,29 @@ def run_apply_stage(
                 application.screenshot_path = result.screenshot_path
 
             if not submit and result.status == "filled":
-                # A new dry-run screenshot must be re-reviewed before submit.
-                if application.review_decision:
-                    logger.info(
-                        "Job %d re-filled; clearing review_decision=%s",
+                # Keep prior approval across re-dry-run — screenshot refresh alone
+                # must not force a second review. Operator should still open the
+                # new screenshot before --submit.
+                if application.review_decision == "approved":
+                    logger.warning(
+                        "Job %d re-filled after approval — keeping review_decision=approved; "
+                        "re-open the new screenshot before --submit",
                         job.id,
-                        application.review_decision,
                     )
-                application.review_decision = None
-                application.reviewed_at = None
+                    note_extra = (
+                        " | approval kept after re-dry-run; re-check screenshot"
+                    )
+                else:
+                    note_extra = ""
+            else:
+                note_extra = ""
 
             note = (
                 f"Apply({'submit' if submit else 'dry-run'}) "
                 f"adapter={result.adapter} status={result.status}"
             )
+            if note_extra:
+                note += note_extra
             if result.error:
                 note += f" | {result.error}"
             if result.fields_filled:
@@ -617,14 +932,31 @@ def run_apply_stage(
                     "Job %d routed to manual_review: %s", job.id, result.error
                 )
                 error_messages.append(f"job {job.id}: {result.error}")
+            elif result.status == "deferred":
+                logger.info(
+                    "Job %d deferred to next apply run: %s", job.id, result.error
+                )
             elif result.status == "skipped":
                 logger.info("Job %d skipped: %s", job.id, result.error)
             elif result.status == "expired":
                 logger.warning("Job %d expired: %s", job.id, result.error)
                 error_messages.append(f"job {job.id}: {result.error}")
             else:
-                logger.error("Job %d apply failed: %s", job.id, result.error)
-                error_messages.append(f"job {job.id}: {result.error}")
+                err = result.error or ""
+                if "Async API" in err or "Sync API inside the asyncio" in err:
+                    # browser-use leaves an event loop; the next Playwright call
+                    # in this process is unusable. Keep the job queued.
+                    job.status = "cover_letter_ready"
+                    logger.warning(
+                        "Job %d browser loop clash — left cover_letter_ready: %s",
+                        job.id,
+                        err.splitlines()[0][:160],
+                    )
+                    summary["failed"] -= 1
+                    summary["deferred"] = summary.get("deferred", 0) + 1
+                else:
+                    logger.error("Job %d apply failed: %s", job.id, result.error)
+                    error_messages.append(f"job {job.id}: {result.error}")
 
             session.commit()
 
